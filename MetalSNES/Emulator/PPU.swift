@@ -1,6 +1,12 @@
 import Foundation
 
 final class PPU {
+    struct PixelTraceTarget {
+        var x: Int
+        var y: Int
+        var label: String
+    }
+
     struct Snapshot {
         var scrollLatch: UInt8 = 0
         var vramPrefetch: UInt16 = 0
@@ -104,6 +110,14 @@ final class PPU {
     private var m7Latch: UInt8 = 0
     private var mpyResult: Int32 = 0
 
+    // Latched H/V beam counters ($2137/$213C/$213D)
+    private var beamHCounter: UInt16 = 0
+    private var beamVCounter: UInt16 = 0
+    private var latchedHCounter: UInt16 = 0
+    private var latchedVCounter: UInt16 = 0
+    private var hCounterReadHigh = false
+    private var vCounterReadHigh = false
+
     // Window
     var w12sel: UInt8 = 0       // $2123
     var w34sel: UInt8 = 0       // $2124
@@ -168,8 +182,14 @@ final class PPU {
     private var mainLayerLine = [UInt8](repeating: 0, count: 256) // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
     private var subLayerLine = [UInt8](repeating: 0, count: 256)  // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
     private var pixelZ = [UInt8](repeating: 0, count: 256)  // z-order per pixel for priority compositing
+    private var spriteScratchValid = [Bool](repeating: false, count: 256)
+    private var spriteScratchColor = [UInt32](repeating: 0, count: 256)
+    private var spriteScratchZ = [UInt8](repeating: 0, count: 256)
+    private var spriteScratchLayer = [UInt8](repeating: 0, count: 256)
     private var _renderingSubScreen = false
     private var _currentLayer: UInt8 = 0
+    private var pixelTraceTargets = [Int: PixelTraceTarget]()
+    private var pixelTraceLogs = [String: [String]]()
     var gpuRenderingAvailable = false
     private(set) var usesGPURenderingThisFrame = false
     private(set) var gpuLineStates = [GPULineState](repeating: GPULineState(), count: SNESConstants.screenHeight)
@@ -240,6 +260,56 @@ final class PPU {
         default:
             return 0
         }
+    }
+
+    func configurePixelTrace(_ targets: [PixelTraceTarget]) {
+        pixelTraceTargets.removeAll(keepingCapacity: true)
+        pixelTraceLogs.removeAll(keepingCapacity: true)
+        for target in targets {
+            let key = target.y * SNESConstants.screenWidth + target.x
+            pixelTraceTargets[key] = target
+            pixelTraceLogs[target.label] = []
+        }
+    }
+
+    func consumePixelTraceLogs() -> [String: [String]] {
+        let logs = pixelTraceLogs
+        pixelTraceTargets.removeAll(keepingCapacity: false)
+        pixelTraceLogs.removeAll(keepingCapacity: false)
+        return logs
+    }
+
+    private func appendPixelTrace(pixelIndex: Int, screenX: Int, message: String) {
+        guard !pixelTraceTargets.isEmpty else { return }
+        let screenY = pixelIndex / SNESConstants.screenWidth
+        let key = screenY * SNESConstants.screenWidth + screenX
+        guard let target = pixelTraceTargets[key] else { return }
+        pixelTraceLogs[target.label, default: []].append(message)
+    }
+
+    private func layerName(for layer: UInt8) -> String {
+        switch layer {
+        case 0: return "backdrop"
+        case 1: return "BG1"
+        case 2: return "BG2"
+        case 3: return "BG3"
+        case 4: return "BG4"
+        case 5: return "OBJ"
+        case 6: return "OBJ-hi"
+        default: return "L\(layer)"
+        }
+    }
+
+    private func spriteDimensions(isLarge: Bool) -> (width: Int, height: Int) {
+        let sizeSelect = Int((objsel >> 5) & 0x07)
+        let smallWidths = [8, 8, 8, 16, 16, 32, 16, 16]
+        let smallHeights = [8, 8, 8, 16, 16, 32, 32, 32]
+        let largeWidths = [16, 32, 64, 32, 64, 64, 32, 32]
+        let largeHeights = [16, 32, 64, 32, 64, 64, 64, 32]
+        if isLarge {
+            return (largeWidths[sizeSelect], largeHeights[sizeSelect])
+        }
+        return (smallWidths[sizeSelect], smallHeights[sizeSelect])
     }
 
     private func shouldUseGPURendering() -> Bool {
@@ -329,6 +399,18 @@ final class PPU {
 
     // MARK: - Register access
 
+    func setBeamPosition(hDot: Int, scanline: Int) {
+        beamHCounter = UInt16(max(0, min(339, hDot)))
+        beamVCounter = UInt16(max(0, min(261, scanline)))
+    }
+
+    private func latchBeamCounters() {
+        latchedHCounter = beamHCounter
+        latchedVCounter = beamVCounter
+        hCounterReadHigh = false
+        vCounterReadHigh = false
+    }
+
     func read(register: UInt16) -> UInt8 {
         switch register {
         case 0x2134: // MPYL - multiplication result low byte
@@ -337,7 +419,9 @@ final class PPU {
             return UInt8(truncatingIfNeeded: mpyResult >> 8)
         case 0x2136: // MPYH - multiplication result high byte
             return UInt8(truncatingIfNeeded: mpyResult >> 16)
-        case 0x2137: return 0 // SLHV - latch H/V counter
+        case 0x2137:
+            latchBeamCounters()
+            return 0 // SLHV - latch H/V counter
         case 0x2138:          // OAM data read
             let addr = Int(oamAddr)
             let val = addr < oam.count ? oam[addr] : 0
@@ -372,10 +456,19 @@ final class PPU {
             }
             cgramFlipFlop.toggle()
             return val
-        case 0x213C: return 0 // OPHCT
-        case 0x213D: return 0 // OPVCT
+        case 0x213C:
+            let value = hCounterReadHigh ? UInt8((latchedHCounter >> 8) & 0x01) : UInt8(latchedHCounter & 0xFF)
+            hCounterReadHigh.toggle()
+            return value
+        case 0x213D:
+            let value = vCounterReadHigh ? UInt8((latchedVCounter >> 8) & 0x01) : UInt8(latchedVCounter & 0xFF)
+            vCounterReadHigh.toggle()
+            return value
         case 0x213E: return 0x01 // STAT77 - PPU1 version
-        case 0x213F: return 0x01 // STAT78 - PPU2 version
+        case 0x213F:
+            hCounterReadHigh = false
+            vCounterReadHigh = false
+            return 0x01 // STAT78 - PPU2 version
         default: return 0
         }
     }
@@ -596,7 +689,8 @@ final class PPU {
 
     // Z-order tables: (pri0, pri1) for each layer, sprite z-orders (pri0..3)
     // Mode 0: BG4p0=1 BG3p0=2 OBJp0=3 BG4p1=4 BG3p1=5 OBJp1=6 BG2p0=7 BG1p0=8 OBJp2=9 BG2p1=10 BG1p1=11 OBJp3=12
-    // Mode 1: BG3p0=1 OBJp0=2 BG3p1=3 OBJp1=4 BG2p0=5 BG1p0=6 OBJp2=7 BG2p1=8 BG1p1=9 OBJp3=10 (BG3p1=11 if bg3top)
+    // Mode 1, bit3 clear: BG3p0=1 OBJp0=2 BG3p1=3 OBJp1=4 BG2p0=5 BG1p0=6 OBJp2=7 BG2p1=8 BG1p1=9 OBJp3=10
+    // Mode 1, bit3 set:   BG3p0=1 OBJp0=2 OBJp1=3 BG2p0=4 BG1p0=5 OBJp2=6 BG2p1=7 BG1p1=8 OBJp3=9 BG3p1=10
     // Mode 3+: BG2p0=1 BG1p0=2 OBJp0=3 OBJp1=4 BG2p1=5 BG1p1=6 OBJp2=7 OBJp3=8
 
     private func renderLayers(mode: UInt8, layerMask: UInt8, hasOBJ: Bool, scanline y: Int) {
@@ -609,11 +703,18 @@ final class PPU {
             if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG2bpp(bg: 0, scanline: y, paletteBase: 0, zOrder0: 8, zOrder1: 11) }
             if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (3, 6, 9, 12)) }
         case 1:
-            let bg3top = (bgmode & 0x08) != 0
-            if (layerMask & 0x04) != 0 { _currentLayer = 3; renderBG2bpp(bg: 2, scanline: y, paletteBase: 0, zOrder0: 1, zOrder1: bg3top ? 11 : 3) }
-            if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 5, zOrder1: 8) }
-            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 6, zOrder1: 9) }
-            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 4, 7, 10)) }
+            let bgPriority = (bgmode & 0x08) != 0
+            if bgPriority {
+                if (layerMask & 0x04) != 0 { _currentLayer = 3; renderBG2bpp(bg: 2, scanline: y, paletteBase: 0, zOrder0: 1, zOrder1: 10) }
+                if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 4, zOrder1: 7) }
+                if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 5, zOrder1: 8) }
+                if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 3, 6, 9)) }
+            } else {
+                if (layerMask & 0x04) != 0 { _currentLayer = 3; renderBG2bpp(bg: 2, scanline: y, paletteBase: 0, zOrder0: 1, zOrder1: 3) }
+                if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 5, zOrder1: 8) }
+                if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 6, zOrder1: 9) }
+                if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 4, 7, 10)) }
+            }
         case 3:
             if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 1, zOrder1: 5) }
             if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG8bpp(bg: 0, scanline: y, zOrder0: 2, zOrder1: 6) }
@@ -1037,18 +1138,6 @@ final class PPU {
             gpuSpriteCounts[scanline] += 1
         }
 
-        let baseSize: Int
-        let largeSize: Int
-        switch (objsel >> 5) & 0x07 {
-        case 0: baseSize = 8; largeSize = 16
-        case 1: baseSize = 8; largeSize = 32
-        case 2: baseSize = 8; largeSize = 64
-        case 3: baseSize = 16; largeSize = 32
-        case 4: baseSize = 16; largeSize = 64
-        case 5: baseSize = 32; largeSize = 64
-        default: baseSize = 8; largeSize = 16
-        }
-
         // Iterate in reverse so that lower-index sprites (higher priority) are appended last,
         // matching the existing reverse draw order in renderSprites
         for i in stride(from: 127, through: 0, by: -1) {
@@ -1056,22 +1145,19 @@ final class PPU {
             let highShift = (i & 3) * 2
             let highBits = (oam[highIdx] >> highShift) & 0x03
             let isLarge = (highBits & 0x02) != 0
-
-            let spriteSize = isLarge ? largeSize : baseSize
+            let spriteHeight = spriteDimensions(isLarge: isLarge).height
             let rawSpriteY = Int(oam[i * 4 + 1])
             let spriteY = (rawSpriteY + 1) & 0xFF
 
             if spriteY < 224 {
-                let end = min(spriteY + spriteSize, 224)
+                let end = min(spriteY + spriteHeight, 224)
                 for scanline in spriteY..<end {
                     appendSprite(i, to: scanline)
                 }
             }
 
-            // Many games park hidden OBJ entries at Y >= 0xF0. Do not wrap those hidden
-            // sprites into the first visible scanline, but preserve the normal +1 seam math.
-            let wrappedEnd = spriteY + spriteSize - 256
-            if rawSpriteY < 0xF0 && wrappedEnd > 0 {
+            let wrappedEnd = spriteY + spriteHeight - 256
+            if wrappedEnd > 0 {
                 let end = min(wrappedEnd, 224)
                 for scanline in 0..<end {
                     appendSprite(i, to: scanline)
@@ -1167,18 +1253,6 @@ final class PPU {
     }
 
     private func renderSprites(scanline: Int, spritePriority: Int? = nil, zOrders: (UInt8, UInt8, UInt8, UInt8) = (1, 2, 3, 4)) {
-        let baseSize: Int
-        let largeSize: Int
-        switch (objsel >> 5) & 0x07 {
-        case 0: baseSize = 8; largeSize = 16
-        case 1: baseSize = 8; largeSize = 32
-        case 2: baseSize = 8; largeSize = 64
-        case 3: baseSize = 16; largeSize = 32
-        case 4: baseSize = 16; largeSize = 64
-        case 5: baseSize = 32; largeSize = 64
-        default: baseSize = 8; largeSize = 16
-        }
-
         let nameBase = Int(objsel & 0x07) << 14
         let nameGap = ((Int(objsel >> 3) & 0x03) + 1) << 13
 
@@ -1187,6 +1261,9 @@ final class PPU {
         // Process only sprites cached for this scanline
         guard scanline < 224 else { return }
         let cachedSprites = spriteScanlineCache[scanline]
+        for x in 0..<SNESConstants.screenWidth {
+            spriteScratchValid[x] = false
+        }
 
         for i in cachedSprites {
             let baseAddr = i * 4
@@ -1205,7 +1282,9 @@ final class PPU {
             var spriteX = x
             if xBit9 { spriteX = x - 256 }
 
-            let spriteSize = isLarge ? largeSize : baseSize
+            let dimensions = spriteDimensions(isLarge: isLarge)
+            let spriteWidth = dimensions.width
+            let spriteHeight = dimensions.height
             let spriteY = (y + 1) & 0xFF
 
             let relY = (scanline - Int(spriteY)) & 0xFF
@@ -1226,9 +1305,17 @@ final class PPU {
             let nameTable = (attr & 0x01) != 0 ? 1 : 0
 
             var fineY = relY
-            if vFlip { fineY = spriteSize - 1 - fineY }
+            if vFlip {
+                if spriteWidth == spriteHeight {
+                    fineY = spriteHeight - 1 - fineY
+                } else if fineY < spriteWidth {
+                    fineY = spriteWidth - 1 - fineY
+                } else {
+                    fineY = spriteWidth + (spriteWidth - 1) - (fineY - spriteWidth)
+                }
+            }
 
-            let tilesWide = spriteSize / 8
+            let tilesWide = spriteWidth / 8
 
             for tileCol in 0..<tilesWide {
                 let drawX = spriteX + tileCol * 8
@@ -1260,10 +1347,23 @@ final class PPU {
                     if pixel != 0 {
                         let colorIdx = paletteOffset + Int(pixel)
                         let sourceLayer: UInt8 = palette >= 12 ? 6 : 5
-                        writePixel(lineOffset + screenX, screenX, color: cgramColorCache[colorIdx], z: spriteZ, sourceLayer: sourceLayer)
+                        spriteScratchValid[screenX] = true
+                        spriteScratchColor[screenX] = cgramColorCache[colorIdx]
+                        spriteScratchZ[screenX] = spriteZ
+                        spriteScratchLayer[screenX] = sourceLayer
                     }
                 }
             }
+        }
+
+        for screenX in 0..<SNESConstants.screenWidth where spriteScratchValid[screenX] {
+            writePixel(
+                lineOffset + screenX,
+                screenX,
+                color: spriteScratchColor[screenX],
+                z: spriteScratchZ[screenX],
+                sourceLayer: spriteScratchLayer[screenX]
+            )
         }
     }
 
@@ -1281,16 +1381,56 @@ final class PPU {
     /// Write a pixel to the active render target with z-order priority check
     @inline(__always)
     private func writePixel(_ pixelIndex: Int, _ screenX: Int, color: UInt32, z: UInt8 = 255, sourceLayer: UInt8? = nil) {
-        guard z >= pixelZ[screenX] else { return }
         let resolvedLayer = sourceLayer ?? _currentLayer
+        let previousZ = pixelZ[screenX]
+        let previousLayer = _renderingSubScreen ? subLayerLine[screenX] : mainLayerLine[screenX]
+        if z < previousZ {
+            appendPixelTrace(
+                pixelIndex: pixelIndex,
+                screenX: screenX,
+                message: String(
+                    format: "%@ %@ z=%d rejected by %@ z=%d",
+                    _renderingSubScreen ? "sub" : "main",
+                    layerName(for: resolvedLayer),
+                    z,
+                    layerName(for: previousLayer),
+                    previousZ
+                )
+            )
+            return
+        }
         let windowMask = _renderingSubScreen ? tsw : tmw
         let windowBit = windowMaskBit(for: resolvedLayer)
         if windowBit != 0 && (windowMask & windowBit) != 0 {
             let windowLayer = resolvedLayer >= 5 ? 5 : Int(resolvedLayer)
             if isWindowMasked(layer: windowLayer, screenX: screenX) {
+                appendPixelTrace(
+                    pixelIndex: pixelIndex,
+                    screenX: screenX,
+                    message: String(
+                        format: "%@ %@ z=%d masked by window",
+                        _renderingSubScreen ? "sub" : "main",
+                        layerName(for: resolvedLayer),
+                        z
+                    )
+                )
                 return
             }
         }
+
+        appendPixelTrace(
+            pixelIndex: pixelIndex,
+            screenX: screenX,
+            message: String(
+                format: "%@ %@ z=%d overwrote %@ z=%d color=%06X",
+                _renderingSubScreen ? "sub" : "main",
+                layerName(for: resolvedLayer),
+                z,
+                layerName(for: previousLayer),
+                previousZ,
+                color & 0x00FF_FFFF
+            )
+        )
 
         if !_renderingSubScreen {
             pixelZ[screenX] = z
@@ -1491,9 +1631,10 @@ final class PPU {
 
     // MARK: - Pixel readback
 
-    func readPixel(x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8) {
+    func readPixel(x: Int, y: Int, presented: Bool = false) -> (r: UInt8, g: UInt8, b: UInt8) {
         let idx = (y * SNESConstants.screenWidth + x) * 4
-        return (backBuffer[idx], backBuffer[idx + 1], backBuffer[idx + 2])
+        let buffer = presented ? frontBuffer : backBuffer
+        return (buffer[idx], buffer[idx + 1], buffer[idx + 2])
     }
 
     // MARK: - Frame management

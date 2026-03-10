@@ -869,33 +869,42 @@ inline uint spriteBaseSize(uint objsel) {
     }
 }
 
-inline uint spriteLargeSize(uint objsel) {
-    switch ((objsel >> 5) & 0x07u) {
-        case 0u: return 16u;
-        case 1u: return 32u;
-        case 2u: return 64u;
-        case 3u: return 32u;
-        case 4u: return 64u;
-        case 5u: return 64u;
-        default: return 16u;
-    }
+inline uint spriteWidth(uint objsel, bool isLarge) {
+    const uint smallWidths[8] = {8u, 8u, 8u, 16u, 16u, 32u, 16u, 16u};
+    const uint largeWidths[8] = {16u, 32u, 64u, 32u, 64u, 64u, 32u, 32u};
+    uint sizeSelect = (objsel >> 5) & 0x07u;
+    return isLarge ? largeWidths[sizeSelect] : smallWidths[sizeSelect];
 }
 
-inline void renderSprites(thread PixelSample &best,
-                          const device uchar *vram,
-                          const device uchar *oam,
-                          const device uint *colors,
-                          const device uint *spriteCounts,
-                          const device ushort *spriteIndices,
-                          const thread GPULineState &line,
-                          uint screenX,
-                          uint screenY,
-                          uint z0,
-                          uint z1,
-                          uint z2,
-                          uint z3) {
-    uint baseSize = spriteBaseSize(line.control.w);
-    uint largeSize = spriteLargeSize(line.control.w);
+inline uint spriteHeight(uint objsel, bool isLarge) {
+    const uint smallHeights[8] = {8u, 8u, 8u, 16u, 16u, 32u, 32u, 32u};
+    const uint largeHeights[8] = {16u, 32u, 64u, 32u, 64u, 64u, 64u, 32u};
+    uint sizeSelect = (objsel >> 5) & 0x07u;
+    return isLarge ? largeHeights[sizeSelect] : smallHeights[sizeSelect];
+}
+
+inline uint flippedSpriteY(uint width, uint height, uint y) {
+    if (width == height) {
+        return height - 1u - y;
+    }
+    if (y < width) {
+        return width - 1u - y;
+    }
+    return width + (width - 1u) - (y - width);
+}
+
+inline IndexedSample sampleSprites(const device uchar *vram,
+                                   const device uchar *oam,
+                                   const device uint *spriteCounts,
+                                   const device ushort *spriteIndices,
+                                   const thread GPULineState &line,
+                                   uint screenX,
+                                   uint screenY,
+                                   uint z0,
+                                   uint z1,
+                                   uint z2,
+                                   uint z3) {
+    IndexedSample sample = {0u, 0u, 0u};
     uint nameBase = (line.control.w & 0x07u) << 14;
     uint nameGap = (((line.control.w >> 3) & 0x03u) + 1u) << 13;
     uint count = min(spriteCounts[screenY], 32u);
@@ -914,13 +923,14 @@ inline void renderSprites(thread PixelSample &best,
         bool xBit9 = (highBits & 0x01u) != 0u;
         bool isLarge = (highBits & 0x02u) != 0u;
         int spriteX = xBit9 ? (x - 256) : x;
-        uint spriteSize = isLarge ? largeSize : baseSize;
+        uint spriteW = spriteWidth(line.control.w, isLarge);
+        uint spriteH = spriteHeight(line.control.w, isLarge);
         uint spriteY = (y + 1u) & 0xFFu;
         int relY = (int(screenY) - int(spriteY)) & 0xFF;
-        if (relY < 0 || uint(relY) >= spriteSize) { continue; }
+        if (relY < 0 || uint(relY) >= spriteH) { continue; }
 
         int localX = int(screenX) - spriteX;
-        if (localX < 0 || uint(localX) >= spriteSize) { continue; }
+        if (localX < 0 || uint(localX) >= spriteW) { continue; }
 
         uint palette = ((attr >> 1u) & 0x07u) + 8u;
         uint objPriority = (attr >> 4u) & 0x03u;
@@ -930,11 +940,11 @@ inline void renderSprites(thread PixelSample &best,
         uint nameTable = attr & 0x01u;
 
         uint fineY = uint(relY);
-        if (vFlip) { fineY = spriteSize - 1u - fineY; }
+        if (vFlip) { fineY = flippedSpriteY(spriteW, spriteH, fineY); }
 
         uint tileRow = fineY / 8u;
         uint tileCol = uint(localX) / 8u;
-        uint tilesWide = spriteSize / 8u;
+        uint tilesWide = spriteW / 8u;
         uint mirrorCol = hFlip ? (tilesWide - 1u - tileCol) : tileCol;
         uint actualTile = tile + tileRow * 16u + mirrorCol;
         uint chrBase = nameTable == 0u ? nameBase : (nameBase + nameGap);
@@ -951,13 +961,14 @@ inline void renderSprites(thread PixelSample &best,
                      (((bp2 >> bit) & 1u) << 2) |
                      (((bp3 >> bit) & 1u) << 3);
 
-        if (pixel != 0u && spriteZ >= best.z) {
-            uint colorIdx = 128u + (palette - 8u) * 16u + pixel;
-            best.color = colors[colorIdx & 0xFFu];
-            best.z = spriteZ;
-            best.layer = palette >= 12u ? 6u : 5u;
+        if (pixel != 0u) {
+            sample.colorIndex = (128u + (palette - 8u) * 16u + pixel) & 0xFFu;
+            sample.z = spriteZ;
+            sample.layer = palette >= 12u ? 6u : 5u;
         }
     }
+
+    return sample;
 }
 
 inline void composeScreen(thread PixelSample &best,
@@ -979,29 +990,36 @@ inline void composeScreen(thread PixelSample &best,
         if ((layerMask & 0x04u) != 0u && !isWindowMaskedForLayer(3u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 2u, screenX, screenY, 64u, 2u, 5u), colors); }
         if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 1u, screenX, screenY, 32u, 7u, 10u), colors); }
         if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 0u, screenX, screenY, 0u, 8u, 11u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { renderSprites(best, vram, oam, colors, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 6u, 9u, 12u); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 6u, 9u, 12u), colors); }
         break;
     case 1u: {
-        bool bg3top = (line.control.y & 0x08u) != 0u;
-        if ((layerMask & 0x04u) != 0u && !isWindowMaskedForLayer(3u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 2u, screenX, screenY, 0u, 1u, bg3top ? 11u : 3u), colors); }
-        if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 5u, 8u), colors); }
-        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 6u, 9u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { renderSprites(best, vram, oam, colors, spriteCounts, spriteIndices, line, screenX, screenY, 2u, 4u, 7u, 10u); }
+        bool bgPriority = (line.control.y & 0x08u) != 0u;
+        if (bgPriority) {
+            if ((layerMask & 0x04u) != 0u && !isWindowMaskedForLayer(3u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 2u, screenX, screenY, 0u, 1u, 10u), colors); }
+            if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 4u, 7u), colors); }
+            if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 5u, 8u), colors); }
+            if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 2u, 3u, 6u, 9u), colors); }
+        } else {
+            if ((layerMask & 0x04u) != 0u && !isWindowMaskedForLayer(3u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG2bpp(vram, line, 2u, screenX, screenY, 0u, 1u, 3u), colors); }
+            if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 5u, 8u), colors); }
+            if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 6u, 9u), colors); }
+            if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 2u, 4u, 7u, 10u), colors); }
+        }
         break;
     }
     case 3u:
         if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 1u, 5u), colors); }
         if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG8bpp(vram, line, 0u, screenX, screenY, 2u, 6u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { renderSprites(best, vram, oam, colors, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u), colors); }
         break;
     case 7u:
         if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleMode7(vram, line, screenX, screenY, 1u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { renderSprites(best, vram, oam, colors, spriteCounts, spriteIndices, line, screenX, screenY, 1u, 2u, 3u, 4u); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 1u, 2u, 3u, 4u), colors); }
         break;
     default:
         if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 1u, 5u), colors); }
         if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 2u, 6u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { renderSprites(best, vram, oam, colors, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u), colors); }
         break;
     }
 }

@@ -866,3 +866,130 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
   - anchored inside the emulator stage
   - scrollable, narrower layout
   - explicit close button
+
+## 2026-03-10: Zelda Rain Intro Black Screen Debug
+
+### Symptom
+- Loading `zelda.state` in the intro/rain sequence produced a fully black frame and appeared frozen.
+- The first question was whether the game logic was still advancing offscreen or whether emulation was actually wedged.
+
+### Investigation
+- Added a headless `--diagnose-state <rom> <state> [frames]` path so the app can load a ROM plus save state without the normal window path and dump CPU/PPU/HDMA state per frame.
+- Fixed the runtime framebuffer diagnostic to sample the presented/front buffer after `runOneFrame()`, not the back buffer left behind after the headless swap.
+- Running `zelda.sfc` + `zelda.state` immediately showed:
+  - `PC=$00F3A6` on every frame
+  - `INIDISP=$80` on every frame
+  - the frame hash and color histogram staying black
+- Disassembling the LoROM bytes around `$00:F3A6` showed Zelda polling `$2137/$213D` and comparing the latched vertical counter against `$00C0`.
+- Our PPU still returned `0` for `$213C/$213D`, so the game sat in forced blank forever waiting for a beam position that never advanced.
+
+### Fix
+- Implemented beam-position tracking in `EmulatorCore.runScanline()` and publish the current scanline/H-dot to the PPU before CPU steps.
+- Implemented `$2137` latch behavior plus `$213C/$213D` reads in `PPU.swift`:
+  - latches current H/V beam counters on `$2137`
+  - returns low/high counter bytes on successive `$213C/$213D` reads
+  - resets the read toggles on `$213F`
+
+### Result
+- The exact bad save state now leaves the wait loop on the first frame:
+  - `PC $00F3A6 -> $008034`
+  - `INIDISP $80 -> $0F`
+- Over a longer 60-frame diagnostic run:
+  - HDMA re-enables on channel 7
+  - the frame hash continues changing
+  - the runtime framebuffer ends with `9/9` sampled points non-black and `24` sampled colors
+- A 5-second live launch with `--rom zelda.sfc --state zelda.state` produced no runtime output/errors.
+
+## 2026-03-10: OBJ Top-Edge Visibility and Non-Square Sprite Fix
+
+### Symptom
+- In Zelda, sprites near the top of the screen could disappear even when a tall sprite should still extend down into the visible area.
+- The current OBJ path also only modeled square sprite sizes, which is incorrect for SNES size modes 6 and 7.
+
+### Root Cause
+- `PPU.swift` used a custom heuristic to suppress wrapped sprites with raw Y values near `$F0`, intended to avoid top-line junk from hidden sprites.
+- That heuristic also suppressed legitimate wrapped sprites at the top edge.
+- The sprite size table only supported square sizes, so modes with `16x32` / `32x64` style objects were being evaluated and flipped incorrectly.
+
+### Fix
+- Added a shared OBJ dimension helper using the bsnes width/height tables for all 8 base-size modes.
+- Updated the per-scanline sprite cache to use the true sprite height and restored proper vertical wrap behavior instead of the old hidden-sprite suppression heuristic.
+- Updated sprite rendering to use real width/height values and bsnes-style vertical flip handling for non-square sprites.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- Build succeeded cleanly after the OBJ changes.
+
+## 2026-03-10: Zelda Throne Room Layering Investigation
+
+### Symptom
+- A Zelda save state that drops directly into the altar/throne-room scene still looked wrong from a layering perspective.
+- The open question was whether this was a Metal-only composition bug, a shared CPU/GPU PPU priority bug, or a scene-specific sprite ordering issue.
+
+### Investigation
+- Corrected the Mode 1 priority tables to match bsnes for `BGMODE` bit 3 set:
+  - CPU path in `PPU.swift`
+  - Metal path in `Shaders.metal`
+- Added a CPU-vs-GPU framebuffer comparison to the save-state diagnostic.
+- Added headless framebuffer readback from the Metal renderer so the diagnostic can compare real GPU output against the CPU reference.
+- Dumped the save-state scene registers and found:
+  - `BGMODE=$09`
+  - `TM=$16`
+  - `TS=$01`
+  - `CGWSEL=$02`
+  - `CGADSUB=$20`
+- That means the scene is using Mode 1 with the special priority bit set, main screen = `BG2 + BG3 + OBJ`, and sub screen = `BG1`.
+- Verified that OAM priority rotation is not involved here:
+  - `OAMADD=$0000`
+  - rotation bit off
+- Dumped the visible sprites in the altar region after the first frame and found two distinct sprite groups:
+  - Link/body sprites at OBJ priority `2`
+  - altar/front-piece sprites at OBJ priority `3`
+- Dumped the rendered save-state frame to `/tmp/metalsnes-zelda-frame0.png` for direct inspection.
+
+### Result
+- The CPU and GPU framebuffers match exactly for frame 0, so this is not a Metal-only bug.
+- The altar/front-piece occluders in this scene are already being emitted as higher-priority OBJ entries than Link, so the remaining issue is not explained by missing GPU priority handling or missing OAM rotation.
+- At this point the bug is narrowed to shared PPU behavior or to a mismatch between the expected game scene and the current reference assumptions.
+
+### Additional Tracing
+- Added per-pixel trace hooks in `PPU.swift` plus save-state diagnostics that:
+  - dump the winning/losing writes at exact overlap pixels
+  - dump visible altar/link OAM entries
+  - dump BG2/BG3 tile samples at those same pixels
+  - write the rendered frame to `/tmp/metalsnes-zelda-frame0.png`
+- The traced overlap points in the center of the altar show:
+  - BG2 writes the floor/background at `z=4`
+  - the altar/front-piece OBJ sprites win at `z=9`
+  - Link's body/head OBJ sprites lose there at `z=6`
+- Just below the altar edge:
+  - the altar OBJ is no longer present
+  - Link's OBJ wins over BG2 as expected
+- BG3 is not the missing occluder at those pixels:
+  - the sampled BG3 tile entries exist, but the pixel value is `0` (transparent) at the traced overlap points
+
+### Current Interpretation
+- The user-visible overlap pixels that were traced are already composited in the expected order:
+  - altar/front OBJ above Link OBJ above BG2
+- So the remaining throne-room complaint is unlikely to be a simple OBJ-vs-BG priority-table bug.
+- The next debugging step was to determine whether the shared OBJ compositor was resolving sprite-vs-sprite overlap incorrectly.
+
+## 2026-03-10: Zelda Throne Room Fix - OBJ OAM Order vs Priority
+
+### Root Cause
+- The shared CPU and Metal renderers were resolving sprite overlap purely by the SNES OBJ priority bits.
+- bsnes does not do that. It first resolves the winning OBJ pixel by OAM order, and only then uses that winning sprite pixel's priority value when comparing OBJ against BG layers.
+- In the throne-room state, Link uses a lower OAM index than the altar/front-piece sprite, so Link's cap should win at the marked overlap pixel even though the altar sprite carries a higher OBJ priority value.
+
+### Changes
+- `PPU.swift` now builds a per-scanline OBJ winner buffer first:
+  - sprite pixels are resolved in cached OAM order,
+  - later writes in that pass win because the cache is already ordered high-index to low-index,
+  - and only the final winning OBJ pixel for each X coordinate is compared against the BG stack.
+- `Shaders.metal` now mirrors the same rule on the Metal path:
+  - it samples the winning OBJ pixel by OAM order first,
+  - then applies the winning sprite sample to the composed BG result using the sprite's BG-facing priority.
+
+### Expected Result
+- In the Zelda throne-room save state, the cap pixel near `(127, 65)` should now come from Link rather than the altar/front overlay sprite.
+- This fix should also correct any other scenes where lower-index sprites were being incorrectly hidden by later OAM entries with higher OBJ priority bits.

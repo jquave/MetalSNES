@@ -267,6 +267,7 @@ final class EmulatorViewModel: ObservableObject {
         if romURL != nil {
             saveSRAM()
         }
+        emulatorCore?.stopDebugServer()
         emulatorCore?.renderer = nil
         emulatorCore = nil
         romURL = nil
@@ -287,6 +288,7 @@ final class EmulatorViewModel: ObservableObject {
     }
 
     private func startEmulationThread(for core: EmulatorCore) {
+        core.startDebugServer()
         core.isRunning = true
         isRunning = true
         statusText = "Running"

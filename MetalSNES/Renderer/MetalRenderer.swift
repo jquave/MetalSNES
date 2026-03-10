@@ -206,6 +206,22 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func readbackFramebufferRGBA() -> [UInt8]? {
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let region = MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                               size: MTLSize(width: width, height: height, depth: 1))
+        textureLock.lock()
+        defer { textureLock.unlock() }
+        guard let texture else {
+            return nil
+        }
+        pixels.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            texture.getBytes(baseAddress, bytesPerRow: width * 4, from: region, mipmapLevel: 0)
+        }
+        return pixels
+    }
+
     func uploadFramebuffer(_ data: UnsafeRawPointer) {
         let region = MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
                                size: MTLSize(width: width, height: height, depth: 1))

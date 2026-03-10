@@ -176,6 +176,47 @@ final class DebugServer {
             }
             return "{\"addr\":\"\(String(format: "0x%04X", addr))\",\"data\":[\(bytes.joined(separator: ","))]}"
 
+        case "/ppu/oam":
+            let start = max(0, min(127, Int(params["index"] ?? "0") ?? 0))
+            let count = max(1, min(128 - start, Int(params["count"] ?? "1") ?? 1))
+            let entries = (start..<(start + count)).map { spriteDescription(ppu: emu.bus.ppu, index: $0) }
+            return "{\"start\":\(start),\"count\":\(count),\"entries\":[\(entries.joined(separator: ","))]}"
+
+        case "/ppu/sprites":
+            let scanline = max(0, min(223, Int(params["scanline"] ?? "0") ?? 0))
+            let entries = sprites(on: scanline, ppu: emu.bus.ppu).map { spriteDescription(ppu: emu.bus.ppu, index: $0.index, details: $0) }
+            return "{\"scanline\":\(scanline),\"count\":\(entries.count),\"entries\":[\(entries.joined(separator: ","))]}"
+
+        case "/ppu/sprite-sample":
+            let x = max(0, min(255, Int(params["x"] ?? "0") ?? 0))
+            let y = max(0, min(223, Int(params["y"] ?? "0") ?? 0))
+            let samples = spriteSamples(atX: x, y: y, ppu: emu.bus.ppu)
+            return "{\"x\":\(x),\"y\":\(y),\"count\":\(samples.count),\"samples\":[\(samples.joined(separator: ","))]}"
+
+        case "/dma/state":
+            let dma = emu.bus.dma
+            let channels = (0..<8).map { ch in
+                let channel = dma.channels[ch]
+                return String(format:
+                    "{\"channel\":%d,\"mdma\":%d,\"hdma\":%d,\"control\":\"0x%02X\",\"mode\":%d,\"destReg\":\"0x%02X\",\"srcBank\":\"0x%02X\",\"srcAddr\":\"0x%04X\",\"size\":\"0x%04X\",\"hdmaBank\":\"0x%02X\",\"hdmaAddr\":\"0x%04X\",\"active\":%d,\"doTransfer\":%d,\"lineCounter\":\"0x%02X\"}",
+                    ch,
+                    (emu.bus.mdmaen & (1 << ch)) != 0 ? 1 : 0,
+                    (emu.bus.hdmaen & (1 << ch)) != 0 ? 1 : 0,
+                    channel.control,
+                    channel.control & 0x07,
+                    channel.destReg,
+                    channel.srcBank,
+                    channel.srcAddr,
+                    channel.size,
+                    channel.hdmaBank,
+                    channel.hdmaAddr,
+                    dma.hdmaActive[ch] ? 1 : 0,
+                    dma.hdmaDoTransfer[ch] ? 1 : 0,
+                    dma.hdmaLineCounter[ch]
+                )
+            }
+            return "{\"mdmaen\":\"\(String(format: "0x%02X", emu.bus.mdmaen))\",\"hdmaen\":\"\(String(format: "0x%02X", emu.bus.hdmaen))\",\"channels\":[\(channels.joined(separator: ","))]}"
+
         case "/cpu/wram":
             let addr = parseHexInt(params["addr"] ?? "0")
             let len = min(Int(params["len"] ?? "16") ?? 16, 256)
@@ -304,9 +345,157 @@ final class DebugServer {
 
         default:
             return """
-            {"endpoints":["/spc/ram?addr=0x0000&len=16","/spc/ram/write?addr=0x01&val=0x01","/spc/ports","/spc/ports/write?port=2&val=0x01","/spc/regs","/spc/timers","/dsp/regs","/dsp/regs/write?reg=0x4C&val=0x01","/dsp/kon?voice=0&srcn=0&pitch=0x1000","/dsp/voices","/cpu/wram?addr=0x1DFB&len=16","/cpu/wram/write?addr=0x1DFB&val=0x01","/cpu/regs","/cpu/write-log","/cpu/trace?ms=50","/audio/stats","/spc/trace?count=500","/spc/inject?p0=0x01&p2=0x01","/wram/range?addr=0x1DF9&len=8"]}
+            {"endpoints":["/spc/ram?addr=0x0000&len=16","/spc/ram/write?addr=0x01&val=0x01","/spc/ports","/spc/ports/write?port=2&val=0x01","/spc/regs","/spc/timers","/dsp/regs","/dsp/regs/write?reg=0x4C&val=0x01","/dsp/kon?voice=0&srcn=0&pitch=0x1000","/dsp/voices","/ppu/vram?addr=0x0000&len=16","/ppu/oam?index=116&count=6","/ppu/sprites?scanline=65","/ppu/sprite-sample?x=127&y=65","/dma/state","/cpu/wram?addr=0x1DFB&len=16","/cpu/wram/write?addr=0x1DFB&val=0x01","/cpu/regs","/cpu/write-log","/cpu/trace?ms=50","/audio/stats","/spc/trace?count=500","/spc/inject?p0=0x01&p2=0x01","/wram/range?addr=0x1DF9&len=8"]}
             """
         }
+    }
+
+    private struct SpriteDetails {
+        var index: Int
+        var x: Int
+        var y: Int
+        var width: Int
+        var height: Int
+        var tile: Int
+        var attr: UInt8
+        var xBit9: Bool
+        var isLarge: Bool
+    }
+
+    private func spriteDescription(ppu: PPU, index: Int, details override: SpriteDetails? = nil) -> String {
+        let details = override ?? spriteDetails(ppu: ppu, index: index)
+        let priority = (details.attr >> 4) & 0x03
+        let palette = (details.attr >> 1) & 0x07
+        let baseAddr = index * 4
+        let rawX = ppu.oam[baseAddr]
+        let rawY = ppu.oam[baseAddr + 1]
+        return String(format:
+            "{\"index\":%d,\"rawX\":\"0x%02X\",\"rawY\":\"0x%02X\",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"tile\":\"0x%02X\",\"attr\":\"0x%02X\",\"priority\":%d,\"palette\":%d,\"hFlip\":%d,\"vFlip\":%d,\"table\":%d,\"xBit9\":%d,\"large\":%d}",
+            details.index,
+            rawX,
+            rawY,
+            details.x,
+            details.y,
+            details.width,
+            details.height,
+            details.tile,
+            details.attr,
+            priority,
+            palette,
+            (details.attr & 0x40) != 0 ? 1 : 0,
+            (details.attr & 0x80) != 0 ? 1 : 0,
+            details.attr & 0x01,
+            details.xBit9 ? 1 : 0,
+            details.isLarge ? 1 : 0
+        )
+    }
+
+    private func spriteDetails(ppu: PPU, index: Int) -> SpriteDetails {
+        let sizeSelect = Int((ppu.objsel >> 5) & 0x07)
+        let smallWidths = [8, 8, 8, 16, 16, 32, 16, 16]
+        let smallHeights = [8, 8, 8, 16, 16, 32, 32, 32]
+        let largeWidths = [16, 32, 64, 32, 64, 64, 32, 32]
+        let largeHeights = [16, 32, 64, 32, 64, 64, 64, 32]
+
+        let baseAddr = index * 4
+        let rawX = Int(ppu.oam[baseAddr])
+        let rawY = Int(ppu.oam[baseAddr + 1])
+        let tile = Int(ppu.oam[baseAddr + 2])
+        let attr = ppu.oam[baseAddr + 3]
+        let highIdx = 512 + (index >> 2)
+        let highShift = (index & 3) * 2
+        let highBits = (ppu.oam[highIdx] >> highShift) & 0x03
+        let xBit9 = (highBits & 0x01) != 0
+        let isLarge = (highBits & 0x02) != 0
+        let width = isLarge ? largeWidths[sizeSelect] : smallWidths[sizeSelect]
+        let height = isLarge ? largeHeights[sizeSelect] : smallHeights[sizeSelect]
+        let x = xBit9 ? (rawX - 256) : rawX
+        let y = (rawY + 1) & 0xFF
+
+        return SpriteDetails(index: index, x: x, y: y, width: width, height: height, tile: tile, attr: attr, xBit9: xBit9, isLarge: isLarge)
+    }
+
+    private func sprites(on scanline: Int, ppu: PPU) -> [SpriteDetails] {
+        var hits = [SpriteDetails]()
+        for index in 0..<128 {
+            let details = spriteDetails(ppu: ppu, index: index)
+            if details.y < 224 {
+                if scanline >= details.y && scanline < min(details.y + details.height, 224) {
+                    hits.append(details)
+                }
+            } else if scanline < details.y + details.height - 256 {
+                hits.append(details)
+            }
+        }
+        return hits
+    }
+
+    private func spriteSamples(atX x: Int, y: Int, ppu: PPU) -> [String] {
+        let nameBase = Int(ppu.objsel & 0x07) << 14
+        let nameGap = ((Int(ppu.objsel >> 3) & 0x03) + 1) << 13
+        var results = [String]()
+
+        for details in sprites(on: y, ppu: ppu) {
+            guard x >= details.x && x < details.x + details.width else { continue }
+
+            let hFlip = (details.attr & 0x40) != 0
+            let vFlip = (details.attr & 0x80) != 0
+            let relX = x - details.x
+            let relY = (y - details.y) & 0xFF
+            let tilesWide = details.width / 8
+
+            var adjustedY = relY
+            if vFlip {
+                if details.width == details.height {
+                    adjustedY = details.height - 1 - adjustedY
+                } else if adjustedY < details.width {
+                    adjustedY = details.width - 1 - adjustedY
+                } else {
+                    adjustedY = details.width + (details.width - 1) - (adjustedY - details.width)
+                }
+            }
+
+            let tileRow = adjustedY / 8
+            let tileCol = relX / 8
+            let mirrorCol = hFlip ? (tilesWide - 1 - tileCol) : tileCol
+            let actualTile = details.tile + tileRow * 16 + mirrorCol
+            let fineY = adjustedY & 7
+            let fineX = hFlip ? (7 - (relX & 7)) : (relX & 7)
+            let chrBase = (details.attr & 0x01) != 0 ? (nameBase + nameGap) : nameBase
+            let chrAddr = chrBase + (actualTile & 0xFF) * 32 + fineY * 2
+            let bp0 = ppu.vram[chrAddr & 0xFFFF]
+            let bp1 = ppu.vram[(chrAddr + 1) & 0xFFFF]
+            let bp2 = ppu.vram[(chrAddr + 16) & 0xFFFF]
+            let bp3 = ppu.vram[(chrAddr + 17) & 0xFFFF]
+            let pixel = spritePixel(bp0: bp0, bp1: bp1, bp2: bp2, bp3: bp3, fineX: fineX)
+
+            results.append(String(format:
+                "{\"index\":%d,\"priority\":%d,\"palette\":%d,\"table\":%d,\"relX\":%d,\"relY\":%d,\"tileRow\":%d,\"tileCol\":%d,\"actualTile\":\"0x%02X\",\"fineX\":%d,\"fineY\":%d,\"chrAddr\":\"0x%04X\",\"pixel\":%d}",
+                details.index,
+                (details.attr >> 4) & 0x03,
+                (details.attr >> 1) & 0x07,
+                details.attr & 0x01,
+                relX,
+                relY,
+                tileRow,
+                tileCol,
+                actualTile & 0xFF,
+                fineX,
+                fineY,
+                chrAddr & 0xFFFF,
+                pixel
+            ))
+        }
+
+        return results
+    }
+
+    private func spritePixel(bp0: UInt8, bp1: UInt8, bp2: UInt8, bp3: UInt8, fineX: Int) -> UInt8 {
+        let bit = 7 - fineX
+        return ((bp0 >> bit) & 1)
+            | (((bp1 >> bit) & 1) << 1)
+            | (((bp2 >> bit) & 1) << 2)
+            | (((bp3 >> bit) & 1) << 3)
     }
 
     private func parseQuery(_ q: String) -> [String: String] {

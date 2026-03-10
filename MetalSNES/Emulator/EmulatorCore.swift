@@ -51,11 +51,17 @@ final class EmulatorCore {
 
     /// Start the HTTP debug server on port 8765 for real-time SPC/DSP inspection.
     func startDebugServer() {
+        guard debugServer == nil else { return }
         bus.captureCPUWriteLog = true
         let server = DebugServer()
         server.emulator = self
         server.start()
         debugServer = server
+    }
+
+    func stopDebugServer() {
+        debugServer?.stop()
+        debugServer = nil
     }
 
     func run() {
@@ -302,6 +308,7 @@ final class EmulatorCore {
 
         // Start of scanline: clear HBlank
         bus.hvbjoy &= ~0x40
+        bus.ppu.setBeamPosition(hDot: 0, scanline: scanline)
 
         // On-demand freeze diagnostic (triggered by Diagnose button)
         let tracing = emitDiagnostics ? _diagRequested.withLock { val -> Bool in
@@ -310,6 +317,8 @@ final class EmulatorCore {
         var traceBuffer: [(UInt32, UInt8)] = []
 
         while cyclesRemaining > 0 {
+            bus.ppu.setBeamPosition(hDot: hDot, scanline: scanline)
+
             if tracing {
                 let pc = (UInt32(cpu.regs.PBR) << 16) | UInt32(cpu.regs.PC)
                 let opcode = bus.read(pc)

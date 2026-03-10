@@ -4,14 +4,17 @@ import MetalKit
 @main
 struct MetalSNESApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    private let isBenchmarkMode = {
+    private let isHeadlessMode = {
         let args = ProcessInfo.processInfo.arguments
-        return args.contains("--benchmark") || args.contains("--benchmark-gpu")
+        return args.contains("--benchmark")
+            || args.contains("--benchmark-gpu")
+            || args.contains("--diagnose-state")
+            || args.contains("--serve-state")
     }()
 
     var body: some Scene {
         WindowGroup {
-            if isBenchmarkMode {
+            if isHeadlessMode {
                 EmptyView()
             } else {
                 ContentView()
@@ -23,11 +26,19 @@ struct MetalSNESApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var headlessDebugCore: EmulatorCore?
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = ProcessInfo.processInfo.arguments
         let isBenchmarkMode = args.contains("--benchmark") || args.contains("--benchmark-gpu")
+        let isStateDiagnosticMode = args.contains("--diagnose-state")
+        let isServeStateMode = args.contains("--serve-state")
 
-        if !isBenchmarkMode {
+        if !isBenchmarkMode && !isStateDiagnosticMode && !isServeStateMode {
             // Bring window to front when launched from CLI/Xcode
             NSApp.activate(ignoringOtherApps: true)
             // Ensure the first window becomes key so emulation can start
@@ -71,6 +82,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 core.benchmark(frames: 120)
                 exit(0)
             }
+        }
+
+        if let idx = args.firstIndex(of: "--diagnose-state") {
+            let romPath = idx + 1 < args.count ? args[idx + 1] : NSHomeDirectory() + "/src/MetalSNES/zelda.sfc"
+            let statePath = idx + 2 < args.count ? args[idx + 2] : NSHomeDirectory() + "/src/MetalSNES/zelda.state"
+            let frames = idx + 3 < args.count ? (Int(args[idx + 3]) ?? 8) : 8
+            DispatchQueue.global(qos: .userInteractive).async {
+                PPUDiagnostic.runSaveStateTest(romPath: romPath, statePath: statePath, frames: frames)
+                exit(0)
+            }
+        }
+
+        if let idx = args.firstIndex(of: "--serve-state") {
+            let romPath = idx + 1 < args.count ? args[idx + 1] : NSHomeDirectory() + "/src/MetalSNES/zelda.sfc"
+            let statePath = idx + 2 < args.count ? args[idx + 2] : NSHomeDirectory() + "/src/MetalSNES/zelda.state"
+            guard let romData = try? Data(contentsOf: URL(fileURLWithPath: romPath)) else {
+                print("SERVE ERROR: Cannot read ROM at \(romPath)")
+                exit(1)
+            }
+            guard let stateData = try? Data(contentsOf: URL(fileURLWithPath: statePath)) else {
+                print("SERVE ERROR: Cannot read state at \(statePath)")
+                exit(1)
+            }
+            guard let cart = try? Cartridge(data: romData) else {
+                print("SERVE ERROR: Cannot parse ROM")
+                exit(1)
+            }
+
+            let core = EmulatorCore(cartridge: cart)
+            let saveState = SaveState()
+            do {
+                try saveState.restore(from: stateData, core: core)
+            } catch {
+                print("SERVE ERROR: Failed to restore state: \(error.localizedDescription)")
+                exit(1)
+            }
+
+            core.startDebugServer()
+            self.headlessDebugCore = core
+            print("SERVE READY: \(romPath) @ \(statePath)")
+            fflush(stdout)
         }
     }
 }
