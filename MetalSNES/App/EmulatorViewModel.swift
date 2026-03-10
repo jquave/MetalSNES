@@ -6,6 +6,8 @@ final class EmulatorViewModel: ObservableObject {
     @Published var statusText = "Ready"
     @Published var debugState = DebugState()
 
+    lazy var inputManager = InputManager()
+
     var renderer: MetalRenderer?
     var emulatorCore: EmulatorCore?
     private(set) var romURL: URL?
@@ -35,6 +37,7 @@ final class EmulatorViewModel: ObservableObject {
             self.emulatorCore = core
             core.renderer = renderer
             core.debugState = debugState
+            inputManager.attach(joypad: core.bus.joypad)
 
             // Load SRAM if a .srm file exists next to the ROM
             let srmURL = core.bus.sramURL(for: url)

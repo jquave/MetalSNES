@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var viewModel = EmulatorViewModel()
     @State private var showDebug = false
+    @State private var showInputSettings = false
 
     var body: some View {
         HSplitView {
@@ -75,8 +76,16 @@ struct ContentView: View {
                 }
             }
             ToolbarItem {
+                Button("Input") {
+                    showInputSettings = true
+                }
+            }
+            ToolbarItem {
                 Toggle("Debug", isOn: $showDebug)
             }
+        }
+        .sheet(isPresented: $showInputSettings) {
+            InputConfigurationView(inputManager: viewModel.inputManager)
         }
         .onAppear {
             let args = ProcessInfo.processInfo.arguments
@@ -158,6 +167,202 @@ struct ContentView: View {
             if FileManager.default.fileExists(atPath: path) {
                 viewModel.loadROM(at: URL(fileURLWithPath: path))
                 return
+            }
+        }
+    }
+}
+
+struct InputConfigurationView: View {
+    @ObservedObject var inputManager: InputManager
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Input Settings")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text("Configure one keyboard key and one controller input for each SNES button.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Done") {
+                    inputManager.cancelCapture()
+                    dismiss()
+                }
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    if inputManager.connectedControllers.isEmpty {
+                        Text("No controllers connected.")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(inputManager.connectedControllers) { controller in
+                            HStack {
+                                Text(controller.name)
+                                Spacer()
+                                Text(controller.profileName)
+                                    .foregroundColor(controller.isSupported ? .secondary : .red)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Button("Discover Controllers") {
+                            inputManager.discoverControllers()
+                        }
+                        Spacer()
+                        if let captureRequest = inputManager.captureRequest {
+                            Text(captureRequest.prompt)
+                                .font(.callout)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            } label: {
+                Text("Controllers")
+            }
+
+            HStack(spacing: 12) {
+                Text("Button")
+                    .frame(width: 90, alignment: .leading)
+                Text("Keyboard")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Gamepad")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(SNESButton.allCases) { button in
+                        InputBindingRow(button: button, inputManager: inputManager)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            HStack {
+                Button("Restore Defaults") {
+                    inputManager.restoreDefaults()
+                }
+                Spacer()
+                if inputManager.captureRequest != nil {
+                    Button("Cancel Capture") {
+                        inputManager.cancelCapture()
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 760, minHeight: 520)
+        .background(
+            KeyboardCaptureMonitor(
+                isActive: inputManager.captureRequest?.mode == .keyboard,
+                onKeyDown: { _ = inputManager.handleKeyDown($0) },
+                onFlagsChanged: { _ = inputManager.handleFlagsChanged($0) }
+            )
+            .frame(width: 0, height: 0)
+        )
+        .onDisappear {
+            inputManager.cancelCapture()
+        }
+    }
+}
+
+struct InputBindingRow: View {
+    let button: SNESButton
+    @ObservedObject var inputManager: InputManager
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(button.displayName)
+                .frame(width: 90, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Text(inputManager.keyboardBindingLabel(for: button))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(inputManager.isCapturing(button, mode: .keyboard) ? "Press Key..." : "Bind Key") {
+                    inputManager.beginKeyboardCapture(for: button)
+                }
+                Button("Clear") {
+                    inputManager.clearKeyboardBinding(for: button)
+                }
+                .disabled(inputManager.configuration.keyboardBinding(for: button) == nil)
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 8) {
+                Text(inputManager.gamepadBindingLabel(for: button))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(inputManager.isCapturing(button, mode: .gamepad) ? "Press Button..." : "Bind Pad") {
+                    inputManager.beginGamepadCapture(for: button)
+                }
+                Button("Clear") {
+                    inputManager.clearGamepadBinding(for: button)
+                }
+                .disabled(inputManager.configuration.gamepadBinding(for: button) == nil)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct KeyboardCaptureMonitor: NSViewRepresentable {
+    let isActive: Bool
+    let onKeyDown: (NSEvent) -> Void
+    let onFlagsChanged: (NSEvent) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onKeyDown: onKeyDown, onFlagsChanged: onFlagsChanged)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.update(isActive: isActive)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.update(isActive: false)
+    }
+
+    final class Coordinator {
+        private let onKeyDown: (NSEvent) -> Void
+        private let onFlagsChanged: (NSEvent) -> Void
+        private var monitor: Any?
+
+        init(onKeyDown: @escaping (NSEvent) -> Void, onFlagsChanged: @escaping (NSEvent) -> Void) {
+            self.onKeyDown = onKeyDown
+            self.onFlagsChanged = onFlagsChanged
+        }
+
+        func update(isActive: Bool) {
+            if isActive {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+                    guard let self else { return event }
+                    switch event.type {
+                    case .keyDown:
+                        self.onKeyDown(event)
+                        return nil
+                    case .flagsChanged:
+                        self.onFlagsChanged(event)
+                        return nil
+                    default:
+                        return event
+                    }
+                }
+            } else if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
             }
         }
     }

@@ -41,6 +41,7 @@
 		AA000032 /* AudioOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000037 /* AudioOutput.swift */; };
 		AA000033 /* SaveState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000038 /* SaveState.swift */; };
 		AA000034 /* DebugServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000039 /* DebugServer.swift */; };
+		AA000040 /* InputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000040 /* InputManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -82,6 +83,7 @@
 		AB000037 /* AudioOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOutput.swift; sourceTree = "<group>"; };
 		AB000038 /* SaveState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveState.swift; sourceTree = "<group>"; };
 		AB000039 /* DebugServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugServer.swift; sourceTree = "<group>"; };
+		AB000040 /* InputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputManager.swift; sourceTree = "<group>"; };
 		AB000099 /* MetalSNES.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalSNES.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -127,6 +129,7 @@
 				AB000001 /* MetalSNESApp.swift */,
 				AB000002 /* ContentView.swift */,
 				AB000003 /* EmulatorViewModel.swift */,
+				AB000040 /* InputManager.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -331,6 +334,7 @@
 				AA000032 /* AudioOutput.swift in Sources */,
 				AA000033 /* SaveState.swift in Sources */,
 				AA000034 /* DebugServer.swift in Sources */,
+				AA000040 /* InputManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

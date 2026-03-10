@@ -1,50 +1,43 @@
 import SwiftUI
 import MetalKit
 
-// MTKView subclass that captures keyboard events and forwards them to Joypad
+// MTKView subclass that captures keyboard events and forwards them to the input manager
 class KeyCaptureMTKView: MTKView {
-    weak var joypad: Joypad?
+    weak var inputManager: InputManager?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
-        if Joypad.keyMap[event.keyCode] != nil {
-            joypad?.keyDown(event.keyCode)
-        } else {
-            super.keyDown(with: event)
+        if inputManager?.handleKeyDown(event) == true {
+            return
         }
+        super.keyDown(with: event)
     }
 
     override func keyUp(with event: NSEvent) {
-        if Joypad.keyMap[event.keyCode] != nil {
-            joypad?.keyUp(event.keyCode)
-        } else {
-            super.keyUp(with: event)
+        if inputManager?.handleKeyUp(event) == true {
+            return
         }
+        super.keyUp(with: event)
     }
 
     override func flagsChanged(with event: NSEvent) {
-        // Handle modifier keys (Shift) for L/R triggers
-        let code = event.keyCode
-        if Joypad.keyMap[code] != nil {
-            if event.modifierFlags.contains(.shift) {
-                joypad?.keyDown(code)
-            } else {
-                joypad?.keyUp(code)
-            }
+        if inputManager?.handleFlagsChanged(event) == true {
+            return
         }
         super.flagsChanged(with: event)
     }
 
-    // Prevent beep on key press
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if Joypad.keyMap[event.keyCode] != nil {
-            if event.type == .keyDown {
-                joypad?.keyDown(event.keyCode)
-            }
-            return true
+    override func resignFirstResponder() -> Bool {
+        inputManager?.resetKeyboardState()
+        return super.resignFirstResponder()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            inputManager?.resetKeyboardState()
         }
-        return super.performKeyEquivalent(with: event)
+        super.viewWillMove(toWindow: newWindow)
     }
 }
 
@@ -65,21 +58,16 @@ struct EmulatorView: NSViewRepresentable {
             viewModel.renderer = renderer
         }
 
-        // Wire up joypad from emulator core if available
-        if let joypad = viewModel.emulatorCore?.bus.joypad {
-            mtkView.joypad = joypad
-        }
+        mtkView.inputManager = viewModel.inputManager
+        viewModel.inputManager.attach(joypad: viewModel.emulatorCore?.bus.joypad)
 
         return mtkView
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
-        // Update joypad reference when emulator core changes
         if let mtkView = nsView as? KeyCaptureMTKView {
-            if let joypad = viewModel.emulatorCore?.bus.joypad {
-                mtkView.joypad = joypad
-            }
-            // Ensure the view can receive key events
+            mtkView.inputManager = viewModel.inputManager
+            viewModel.inputManager.attach(joypad: viewModel.emulatorCore?.bus.joypad)
             if nsView.window?.firstResponder !== nsView {
                 nsView.window?.makeFirstResponder(nsView)
             }

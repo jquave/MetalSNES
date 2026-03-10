@@ -455,3 +455,24 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
 - IDs $09-$0C, $0F, $10, $16: Reset tempo speedup from "Hurry Up!"
 - $80-$FF on port $2142: Fade out (240 tempo ticks)
 - $F0 on port $2142: Stop music
+
+## 2026-03-10: Input System Rework Plan
+
+### Goal
+- Replace the fixed keyboard-only input path with a persisted binding system that supports both keyboard and GameController devices.
+- Fix stuck-button behavior caused by relying on raw `keyDown`/`keyUp` events without reconciling held state when focus changes.
+
+### Implementation Notes
+- Add an `InputManager` in the app layer that owns:
+  - persisted keyboard and gamepad bindings
+  - current pressed keyboard keys
+  - current active gamepad controls across connected controllers
+  - rebinding capture state for the UI
+- Refactor `Joypad` so keyboard and gamepad state are tracked separately and merged when the CPU latches or auto-reads controller state.
+- Route `MTKView` keyboard handling through the input manager instead of a hard-coded map in `Joypad`.
+- Clear transient keyboard state when the view resigns first responder or the app deactivates, then resync controller state when the app becomes active again.
+
+### UI Plan
+- Add an input settings sheet to the toolbar.
+- Show connected controllers and profile support.
+- Allow rebinding one keyboard key and one gamepad control per SNES button, with defaults and clear/reset actions.
