@@ -682,3 +682,102 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
 ### Validation
 - `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
 - 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output
+
+## 2026-03-10: Display Configuration + UI Cleanup
+
+### Goal
+- Make the presentation path configurable for actual play instead of only exposing low-level debug controls.
+- Improve fullscreen/pixel presentation quality with integer scaling and a configurable post-process pass.
+- Clean up the main window so the emulator surface is the focus instead of a row of utility buttons.
+
+### Changes
+- Added persisted display configuration:
+  - integer scaling toggle
+  - display filter modes: `Clean`, `Scanlines`, `CRT Glass`
+- Moved integer scaling to the final Metal display pass instead of relying on SwiftUI view sizing.
+  - the renderer now computes a centered content rect in drawable pixels
+  - fullscreen and arbitrary window sizes now letterbox correctly while preserving aspect
+  - integer scaling falls back to fitted scaling below 1x instead of clipping
+- Added a CRT-style post-process shader with:
+  - scanline contrast
+  - triad mask
+  - light bloom
+  - curvature
+  - vignette
+- Refreshed the main window UI:
+  - dedicated header card with ROM/status summary
+  - focused display stage with overlay status chips
+  - bottom control deck for run/pause/step/fullscreen/state actions
+  - reduced toolbar clutter by moving utility actions into a tools menu
+  - new display settings sheet for screen + latency options
+- Increased the default window size so the display-first layout has room by default.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output
+
+## 2026-03-10: Aperture-Grille Phosphor Filter
+
+### Goal
+- Try a CRT-inspired presentation mode that prioritizes phosphor glow and RGB bleed over the more obvious scanline/curvature tricks.
+- Keep it visually distinct from the existing `CRT Glass` mode so it is useful as an alternative rather than a minor tweak.
+
+### Changes
+- Added a new persisted display preset: `Aperture Bloom`.
+- Implemented a dedicated fragment path for the preset in the final Metal pass:
+  - anisotropic source-texel blending over a `5x3` neighborhood to create localized phosphor spread
+  - brighter horizontal halo contribution so hot pixels bleed into nearby phosphors instead of staying perfectly boxed
+  - a softer aperture-grille RGB mask applied in display space, without scanlines, curvature, or vignette
+- Kept the existing `CRT Glass` path intact for users who want the stronger retro stylization.
+
+### Notes
+- This is the closest match to the "beautiful CRT glow" described for Trinitron-style displays:
+  - aperture-grille RGB structure
+  - localized color bleed from bright texels
+  - no forced barrel distortion
+- It is intentionally a little heavier than the other display presets because the phosphor bloom comes from neighborhood sampling, not just a cheap overlay.
+
+## 2026-03-10: Alternate Phosphor Variant
+
+### Goal
+- Keep the first phosphor preset intact and add a second option for users who prefer a hotter, more bleeding look.
+
+### Changes
+- Added a second selectable phosphor-style preset and refined it into a distinct `Trinitron` look.
+- Tuned the alternate preset away from the first phosphor pass instead of just making it hotter:
+  - explicit RGB cell structure within each emulated pixel footprint
+  - darker scanline gaps between source rows
+  - more restrained highlight bloom so the cell/slot-mask structure stays visible
+- Left `Aperture Bloom` unchanged so users can choose between the softer bloom look and the more structured Trinitron-style presentation.
+- Follow-up tuning pushed the `Trinitron` preset further toward the target look:
+  - taller rounded-rectangle phosphor bars
+  - more glow around each RGB cell
+  - slightly softer slot-mask gap so the cells feel emissive instead of cut out
+- Additional tuning increased the overall emissive feel:
+  - brighter cluster bleed from hot/white texels into nearby phosphor cells
+  - a low gray pedestal so darker texels still carry a subtle non-black glow
+
+## 2026-03-10: Top-Edge Sprite Leak + Fullscreen Controls
+
+### Problem
+- The top of the frame could show a few junk sprite fragments on scanline `0`.
+- The artifact appeared to track gameplay state, which pointed away from the display filter and toward OBJ rendering.
+- Toggling fullscreen only fullscreened the macOS window reliably; the emulator stage itself was not stretching to fill the available space.
+
+### Changes
+- Adjusted the OBJ top-edge handling in `PPU.swift`:
+  - preserved the existing `y + 1` seam math for sprite row selection
+  - clipped the common hidden-sprite wrap case instead of letting parked sprites leak onto scanline `0`
+- This stops the stray top-edge fragments without introducing seams inside larger sprites.
+- Made the main emulator column and display stage expand to fill the fullscreen window instead of holding near their windowed size.
+- Added direct fullscreen hotkeys from the Metal view:
+  - `F`
+  - `Command-Return`
+
+### Follow-up
+- Restored the original `y + 1` sprite row seam handling after it introduced missing horizontal seams inside larger sprites.
+- Kept the top-edge fix by clipping the common hidden-sprite wrap case (`Y >= 0xF0`) instead of shifting all sprite row math.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output

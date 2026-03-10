@@ -34,6 +34,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let spriteCountBuffer: MTLBuffer?
     private let spriteIndexBuffer: MTLBuffer?
     private var pendingFrameSource: PendingFrameSource = .uploadedFramebuffer
+    private var displayConfiguration = DisplayConfiguration.default
     private var latestFrameID: UInt64 = 0
     private var latestFrameReadyTime: UInt64 = 0
     private var lastTextureFrameID: UInt64 = 0
@@ -177,6 +178,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func applyDisplayConfiguration(_ configuration: DisplayConfiguration) {
+        textureLock.lock()
+        displayConfiguration = configuration
+        textureLock.unlock()
+    }
+
     func uploadFramebuffer(_ data: UnsafeRawPointer) {
         let region = MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
                                size: MTLSize(width: width, height: height, depth: 1))
@@ -256,6 +263,78 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    private func makeDisplayUniforms(for view: MTKView) -> DisplayUniforms {
+        let drawableWidth = max(Float(view.drawableSize.width), 1)
+        let drawableHeight = max(Float(view.drawableSize.height), 1)
+        let textureWidth = Float(width)
+        let textureHeight = Float(height)
+        let scaleX = drawableWidth / textureWidth
+        let scaleY = drawableHeight / textureHeight
+        let fittedScale = min(scaleX, scaleY)
+        let chosenScale: Float
+        if displayConfiguration.integerScalingEnabled {
+            chosenScale = fittedScale >= 1 ? floor(fittedScale) : fittedScale
+        } else {
+            chosenScale = fittedScale
+        }
+        let contentWidth = min(textureWidth * chosenScale, drawableWidth)
+        let contentHeight = min(textureHeight * chosenScale, drawableHeight)
+        let contentOriginX = floor((drawableWidth - contentWidth) * 0.5)
+        let contentOriginY = floor((drawableHeight - contentHeight) * 0.5)
+
+        var uniforms = DisplayUniforms()
+        uniforms.viewportSize = SIMD2(drawableWidth, drawableHeight)
+        uniforms.textureSize = SIMD2(textureWidth, textureHeight)
+        uniforms.contentOrigin = SIMD2(contentOriginX, contentOriginY)
+        uniforms.contentSize = SIMD2(contentWidth, contentHeight)
+        uniforms.integerScalingEnabled = displayConfiguration.integerScalingEnabled ? 1 : 0
+
+        switch displayConfiguration.filterMode {
+        case .clean:
+            uniforms.filterMode = 0
+            uniforms.scanlineStrength = 0
+            uniforms.maskStrength = 0
+            uniforms.bloomStrength = 0
+            uniforms.curvature = 0
+            uniforms.vignetteStrength = 0
+            uniforms.sharpness = 1
+        case .scanlines:
+            uniforms.filterMode = 1
+            uniforms.scanlineStrength = 0.16
+            uniforms.maskStrength = 0.04
+            uniforms.bloomStrength = 0.06
+            uniforms.curvature = 0
+            uniforms.vignetteStrength = 0.05
+            uniforms.sharpness = 1.35
+        case .crt:
+            uniforms.filterMode = 2
+            uniforms.scanlineStrength = 0.26
+            uniforms.maskStrength = 0.11
+            uniforms.bloomStrength = 0.18
+            uniforms.curvature = 0.08
+            uniforms.vignetteStrength = 0.2
+            uniforms.sharpness = 1.75
+        case .phosphor:
+            uniforms.filterMode = 3
+            uniforms.scanlineStrength = 0
+            uniforms.maskStrength = 0.2
+            uniforms.bloomStrength = 0.52
+            uniforms.curvature = 0
+            uniforms.vignetteStrength = 0
+            uniforms.sharpness = 0.72
+        case .phosphorHot:
+            uniforms.filterMode = 4
+            uniforms.scanlineStrength = 0.30
+            uniforms.maskStrength = 0.44
+            uniforms.bloomStrength = 0.66
+            uniforms.curvature = 0
+            uniforms.vignetteStrength = 0
+            uniforms.sharpness = 0.64
+        }
+
+        return uniforms
+    }
+
     private func encodePendingComputePass(into commandBuffer: MTLCommandBuffer) {
         guard pendingFrameSource == .gpuPPU,
               let ppuComputePipeline,
@@ -318,6 +397,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             lastTextureFrameID = latestFrameID
         }
         let displayTexture = texture
+        let displayUniforms = makeDisplayUniforms(for: view)
         if lastDrawTime != 0, now - lastDrawTime <= statsGapResetThreshold {
             let drawInterval = now - lastDrawTime
             displayIntervalSamples &+= 1
@@ -346,6 +426,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentBytes([displayUniforms], length: MemoryLayout<DisplayUniforms>.stride, index: 0)
         encoder.setFragmentTexture(displayTexture, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()

@@ -4,10 +4,14 @@ import MetalKit
 // MTKView subclass that captures keyboard events and forwards them to the input manager
 class KeyCaptureMTKView: MTKView {
     weak var inputManager: InputManager?
+    var onToggleFullScreen: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
+        if handleFullscreenShortcut(event) {
+            return
+        }
         if inputManager?.handleKeyDown(event) == true {
             return
         }
@@ -39,6 +43,25 @@ class KeyCaptureMTKView: MTKView {
         }
         super.viewWillMove(toWindow: newWindow)
     }
+
+    private func handleFullscreenShortcut(_ event: NSEvent) -> Bool {
+        guard inputManager?.captureRequest == nil else {
+            return false
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.isEmpty, event.keyCode == 3, !event.isARepeat {
+            onToggleFullScreen?()
+            return true
+        }
+
+        if modifiers == [.command], (event.keyCode == 36 || event.keyCode == 76) {
+            onToggleFullScreen?()
+            return true
+        }
+
+        return false
+    }
 }
 
 struct EmulatorView: NSViewRepresentable {
@@ -49,9 +72,13 @@ struct EmulatorView: NSViewRepresentable {
         mtkView.device = MTLCreateSystemDefaultDevice()
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.framebufferOnly = true
+        mtkView.clearColor = MTLClearColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1.0)
         mtkView.preferredFramesPerSecond = NSScreen.main?.maximumFramesPerSecond ?? 60
         mtkView.enableSetNeedsDisplay = false
         mtkView.isPaused = !viewModel.isRunning
+        mtkView.onToggleFullScreen = {
+            (mtkView.window ?? NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
+        }
 
         if let renderer = MetalRenderer(mtkView: mtkView) {
             mtkView.delegate = renderer
@@ -67,6 +94,9 @@ struct EmulatorView: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         if let mtkView = nsView as? KeyCaptureMTKView {
             mtkView.inputManager = viewModel.inputManager
+            mtkView.onToggleFullScreen = {
+                (mtkView.window ?? NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
+            }
             viewModel.inputManager.attach(joypad: viewModel.emulatorCore?.bus.joypad)
             mtkView.preferredFramesPerSecond = nsView.window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
             mtkView.isPaused = !viewModel.isRunning

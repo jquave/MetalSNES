@@ -18,7 +18,7 @@ struct MetalSNESApp: App {
             }
         }
         .windowStyle(.titleBar)
-        .defaultSize(width: 800, height: 600)
+        .defaultSize(width: 1220, height: 820)
     }
 }
 

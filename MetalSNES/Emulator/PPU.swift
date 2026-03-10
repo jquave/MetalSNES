@@ -1058,7 +1058,8 @@ final class PPU {
             let isLarge = (highBits & 0x02) != 0
 
             let spriteSize = isLarge ? largeSize : baseSize
-            let spriteY = (Int(oam[i * 4 + 1]) + 1) & 0xFF
+            let rawSpriteY = Int(oam[i * 4 + 1])
+            let spriteY = (rawSpriteY + 1) & 0xFF
 
             if spriteY < 224 {
                 let end = min(spriteY + spriteSize, 224)
@@ -1067,8 +1068,10 @@ final class PPU {
                 }
             }
 
+            // Many games park hidden OBJ entries at Y >= 0xF0. Do not wrap those hidden
+            // sprites into the first visible scanline, but preserve the normal +1 seam math.
             let wrappedEnd = spriteY + spriteSize - 256
-            if wrappedEnd > 0 {
+            if rawSpriteY < 0xF0 && wrappedEnd > 0 {
                 let end = min(wrappedEnd, 224)
                 for scanline in 0..<end {
                     appendSprite(i, to: scanline)

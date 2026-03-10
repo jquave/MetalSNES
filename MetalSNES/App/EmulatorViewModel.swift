@@ -4,10 +4,17 @@ import Combine
 final class EmulatorViewModel: ObservableObject {
     private static let runAheadFramesKey = "MetalSNES.runAheadFrames"
     private static let defaultRunAheadFrames = 1
+    private static let displayConfigurationKey = "MetalSNES.displayConfiguration"
 
     @Published var isRunning = false
     @Published var statusText = "Ready"
     @Published var debugState = DebugState()
+    @Published var displayConfiguration: DisplayConfiguration {
+        didSet {
+            persistDisplayConfiguration()
+            renderer?.applyDisplayConfiguration(displayConfiguration)
+        }
+    }
     @Published var runAheadFrames: Int {
         didSet {
             let clamped = Self.clampRunAheadFrames(runAheadFrames)
@@ -22,7 +29,11 @@ final class EmulatorViewModel: ObservableObject {
 
     lazy var inputManager = InputManager()
 
-    var renderer: MetalRenderer?
+    var renderer: MetalRenderer? {
+        didSet {
+            renderer?.applyDisplayConfiguration(displayConfiguration)
+        }
+    }
     var emulatorCore: EmulatorCore?
     private(set) var romURL: URL?
     private var debugUIEnabled = false
@@ -33,6 +44,7 @@ final class EmulatorViewModel: ObservableObject {
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
+        self.displayConfiguration = Self.loadDisplayConfiguration(from: userDefaults)
         let initialRunAheadFrames = Self.initialRunAheadFrames(from: userDefaults)
         self.runAheadFrames = initialRunAheadFrames
         if Self.commandLineRunAheadFrames() == nil,
@@ -248,8 +260,26 @@ final class EmulatorViewModel: ObservableObject {
         }
     }
 
+    var romDisplayName: String {
+        if let romURL {
+            return romURL.deletingPathExtension().lastPathComponent
+        }
+        return "No ROM Loaded"
+    }
+
+    func restoreDefaultDisplayConfiguration() {
+        displayConfiguration = .default
+    }
+
     private static func clampRunAheadFrames(_ value: Int) -> Int {
         min(max(value, 0), 1)
+    }
+
+    private func persistDisplayConfiguration() {
+        guard let data = try? JSONEncoder().encode(displayConfiguration) else {
+            return
+        }
+        userDefaults.set(data, forKey: Self.displayConfigurationKey)
     }
 
     private static func initialRunAheadFrames(from userDefaults: UserDefaults) -> Int {
@@ -271,5 +301,15 @@ final class EmulatorViewModel: ObservableObject {
             return nil
         }
         return clampRunAheadFrames(value)
+    }
+
+    private static func loadDisplayConfiguration(from userDefaults: UserDefaults) -> DisplayConfiguration {
+        guard
+            let data = userDefaults.data(forKey: displayConfigurationKey),
+            let configuration = try? JSONDecoder().decode(DisplayConfiguration.self, from: data)
+        else {
+            return .default
+        }
+        return configuration
     }
 }
