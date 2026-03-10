@@ -7,7 +7,8 @@ final class AudioOutput {
     private var sourceNode: AVAudioSourceNode?
 
     // Ring buffer (single-producer / single-consumer, lock-protected positions)
-    private let bufferSize = 8192  // samples per channel
+    private let bufferSize = 16384  // samples per channel
+    private let prebufferSamples = 1024
     private var bufferL: [Int16]
     private var bufferR: [Int16]
     private var writePos = 0  // only written by emulator thread
@@ -20,6 +21,9 @@ final class AudioOutput {
     private var lastSampleL: Float = 0
     private var lastSampleR: Float = 0
     private let decayFactor: Float = 0.95
+    private var primed = false
+    private var underrunCount: UInt64 = 0
+    private var overrunCount: UInt64 = 0
 
     private let sampleRate: Double = 32000.0
     private var isRunning = false
@@ -54,76 +58,32 @@ final class AudioOutput {
             if ablPointer.count >= 2 {
                 let dataL = ablPointer[0].mData?.assumingMemoryBound(to: Float.self)
                 let dataR = ablPointer[1].mData?.assumingMemoryBound(to: Float.self)
-
-                for frame in 0..<frames {
-                    // Read positions under lock
-                    os_unfair_lock_lock(&self.lock)
-                    let wp = self.writePos
-                    let rp = self.readPos
-                    os_unfair_lock_unlock(&self.lock)
-
-                    let available = (wp &- rp &+ self.bufferSize) % self.bufferSize
-
-                    if available > 0 {
-                        let idx = rp % self.bufferSize
-                        let sL = Float(self.bufferL[idx]) / 32768.0
-                        let sR = Float(self.bufferR[idx]) / 32768.0
-                        self.lastSampleL = sL
-                        self.lastSampleR = sR
-                        dataL?[frame] = sL
-                        dataR?[frame] = sR
-
-                        os_unfair_lock_lock(&self.lock)
-                        self.readPos = (rp + 1) % self.bufferSize
-                        os_unfair_lock_unlock(&self.lock)
-                    } else {
-                        // Underrun: fade last sample toward zero to avoid clicks
-                        self.lastSampleL *= self.decayFactor
-                        self.lastSampleR *= self.decayFactor
-                        dataL?[frame] = self.lastSampleL
-                        dataR?[frame] = self.lastSampleR
-                    }
+                let produced = self.dequeueSamples(frameCount: frames) { frame, left, right in
+                    dataL?[frame] = left
+                    dataR?[frame] = right
+                }
+                self.fillRemainingOutput(startFrame: produced, frameCount: frames) { frame, left, right in
+                    dataL?[frame] = left
+                    dataR?[frame] = right
                 }
             } else if ablPointer.count == 1 {
                 // Interleaved fallback: single buffer with alternating L/R
                 let data = ablPointer[0].mData?.assumingMemoryBound(to: Float.self)
                 let channels = Int(ablPointer[0].mNumberChannels)
-
-                for frame in 0..<frames {
-                    os_unfair_lock_lock(&self.lock)
-                    let wp = self.writePos
-                    let rp = self.readPos
-                    os_unfair_lock_unlock(&self.lock)
-
-                    let available = (wp &- rp &+ self.bufferSize) % self.bufferSize
-
-                    if available > 0 {
-                        let idx = rp % self.bufferSize
-                        let sampleL = Float(self.bufferL[idx]) / 32768.0
-                        let sampleR = Float(self.bufferR[idx]) / 32768.0
-                        self.lastSampleL = sampleL
-                        self.lastSampleR = sampleR
-
-                        os_unfair_lock_lock(&self.lock)
-                        self.readPos = (rp + 1) % self.bufferSize
-                        os_unfair_lock_unlock(&self.lock)
-
-                        if channels == 2 {
-                            data?[frame * 2] = sampleL
-                            data?[frame * 2 + 1] = sampleR
-                        } else {
-                            data?[frame] = (sampleL + sampleR) * 0.5
-                        }
+                let produced = self.dequeueSamples(frameCount: frames) { frame, left, right in
+                    if channels == 2 {
+                        data?[frame * 2] = left
+                        data?[frame * 2 + 1] = right
                     } else {
-                        // Underrun: fade last sample toward zero
-                        self.lastSampleL *= self.decayFactor
-                        self.lastSampleR *= self.decayFactor
-                        if channels == 2 {
-                            data?[frame * 2] = self.lastSampleL
-                            data?[frame * 2 + 1] = self.lastSampleR
-                        } else {
-                            data?[frame] = (self.lastSampleL + self.lastSampleR) * 0.5
-                        }
+                        data?[frame] = (left + right) * 0.5
+                    }
+                }
+                self.fillRemainingOutput(startFrame: produced, frameCount: frames) { frame, left, right in
+                    if channels == 2 {
+                        data?[frame * 2] = left
+                        data?[frame * 2 + 1] = right
+                    } else {
+                        data?[frame] = (left + right) * 0.5
                     }
                 }
             }
@@ -148,7 +108,12 @@ final class AudioOutput {
         os_unfair_lock_lock(&lock)
         writePos = 0
         readPos = 0
+        primed = false
+        underrunCount = 0
+        overrunCount = 0
         os_unfair_lock_unlock(&lock)
+        lastSampleL = 0
+        lastSampleR = 0
     }
 
     /// Called from emulator thread to enqueue a stereo sample pair
@@ -156,16 +121,15 @@ final class AudioOutput {
         os_unfair_lock_lock(&lock)
         let wp = writePos
         let rp = readPos
-        os_unfair_lock_unlock(&lock)
-
         let nextWrite = (wp + 1) % bufferSize
-        // Drop sample if buffer is full (1 sample headroom)
-        guard nextWrite != rp else { return }
+        if nextWrite == rp {
+            // Keep the newest audio and discard the oldest queued sample.
+            readPos = (rp + 1) % bufferSize
+            overrunCount &+= 1
+        }
 
         bufferL[wp] = left
         bufferR[wp] = right
-
-        os_unfair_lock_lock(&lock)
         writePos = nextWrite
         os_unfair_lock_unlock(&lock)
     }
@@ -176,6 +140,71 @@ final class AudioOutput {
         let result = (writePos - readPos + bufferSize) % bufferSize
         os_unfair_lock_unlock(&lock)
         return result
+    }
+
+    var underrunEvents: UInt64 {
+        os_unfair_lock_lock(&lock)
+        let result = underrunCount
+        os_unfair_lock_unlock(&lock)
+        return result
+    }
+
+    var overrunEvents: UInt64 {
+        os_unfair_lock_lock(&lock)
+        let result = overrunCount
+        os_unfair_lock_unlock(&lock)
+        return result
+    }
+
+    private func dequeueSamples(frameCount: Int, write: (_ frame: Int, _ left: Float, _ right: Float) -> Void) -> Int {
+        os_unfair_lock_lock(&lock)
+        let wp = writePos
+        let rp = readPos
+        let available = (wp &- rp &+ bufferSize) % bufferSize
+
+        if !primed {
+            if available < prebufferSamples {
+                os_unfair_lock_unlock(&lock)
+                lastSampleL = 0
+                lastSampleR = 0
+                return 0
+            }
+            primed = true
+        }
+
+        let toRead = min(frameCount, available)
+        for frame in 0..<toRead {
+            let idx = (rp + frame) % bufferSize
+            let sL = Float(bufferL[idx]) / 32768.0
+            let sR = Float(bufferR[idx]) / 32768.0
+            lastSampleL = sL
+            lastSampleR = sR
+            write(frame, sL, sR)
+        }
+        readPos = (rp + toRead) % bufferSize
+        if toRead < frameCount {
+            primed = false
+            underrunCount &+= 1
+        }
+        os_unfair_lock_unlock(&lock)
+        return toRead
+    }
+
+    private func fillRemainingOutput(startFrame: Int, frameCount: Int, write: (_ frame: Int, _ left: Float, _ right: Float) -> Void) {
+        guard startFrame < frameCount else { return }
+
+        if startFrame == 0 {
+            for frame in 0..<frameCount {
+                write(frame, 0, 0)
+            }
+            return
+        }
+
+        for frame in startFrame..<frameCount {
+            lastSampleL *= decayFactor
+            lastSampleR *= decayFactor
+            write(frame, lastSampleL, lastSampleR)
+        }
     }
 
     deinit {

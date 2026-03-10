@@ -226,7 +226,9 @@ final class DebugServer {
 
         case "/audio/stats":
             let buffered = emu.bus.apu.audioOutput.bufferedSamples
-            return "{\"buffered\":\(buffered),\"dspSamples\":\(dsp.diagSampleCount),\"nonZero\":\(dsp.diagNonZeroSamples),\"konCount\":\(dsp.diagKonCount)}"
+            let underruns = emu.bus.apu.audioOutput.underrunEvents
+            let overruns = emu.bus.apu.audioOutput.overrunEvents
+            return "{\"buffered\":\(buffered),\"dspSamples\":\(dsp.diagSampleCount),\"nonZero\":\(dsp.diagNonZeroSamples),\"konCount\":\(dsp.diagKonCount),\"underruns\":\(underruns),\"overruns\":\(overruns)}"
 
         case "/bus/regs":
             return """

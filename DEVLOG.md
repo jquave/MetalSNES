@@ -1,5 +1,33 @@
 # MetalSNES Development Log
 
+## 2026-03-10: Overworld Ghosting + Audio Pops Follow-up
+
+### Findings
+- The first overworld transparency pass fixed stale sub-screen/fixed-color behavior, but it was not enough to fix the saved-state repro where Mario still looked partially transparent on the map.
+- The remaining high-confidence PPU bug was that `PPU.swift` collapsed all sprite pixels into a single `OBJ` source for color math. On real hardware, color math only applies to `OBJ2` (sprite palettes 12-15 / CGRAM indices `>= 192`), while `OBJ1` never participates.
+- That meant normal sprite palettes could be blended whenever OBJ math was enabled at all, which matches the "ghost-like Mario" symptom on the overworld.
+- The audio popping investigation pointed at host-side buffering rather than the DSP mix itself:
+  - the output ring buffer was small,
+  - startup had no prebuffer,
+  - overflow handling dropped the newest sample abruptly,
+  - and there was no underrun/overrun telemetry in the debug endpoint.
+
+### Changes
+- PPU:
+  - corrected color math setup so `$2130` bit 1 selects sub-screen vs fixed-color blending, while bits 4-7 are treated as color-window masks,
+  - stopped re-deriving fixed color from the last raw `$2132` write and instead used the accumulated fixed-color channels,
+  - cleared and reinitialized the sub-screen scanline buffer before sub-screen blending so stale below pixels do not leak into later frames,
+  - split sprite source tagging into `OBJ1` vs `OBJ2` so only sprite palettes 12-15 are eligible for color math.
+- Audio:
+  - increased the host ring buffer size,
+  - added a startup prebuffer to avoid immediate underruns,
+  - changed overflow handling to discard the oldest queued sample rather than the newest one,
+  - exposed underrun/overrun counters through `/audio/stats`.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Release -derivedDataPath /tmp/MetalSNESReleaseDerived build CODE_SIGNING_ALLOWED=NO` succeeded after both passes.
+- The overworld `mario.state` repro was re-run in the `Release` app, and the user confirmed the updated build fixed the ghost-like Mario transparency issue.
+
 ## 2026-03-10: Markdown Audit — Repo Docs Reconciled With Current Code
 
 ### Findings

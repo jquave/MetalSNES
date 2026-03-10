@@ -129,7 +129,8 @@ final class PPU {
 
     // Color math / subscreen support
     private var subScreenBuffer: UnsafeMutableBufferPointer<UInt8>
-    private var mainLayerLine = [UInt8](repeating: 0, count: 256) // 0=backdrop, 1=BG1..4=BG4, 5=OBJ
+    private var mainLayerLine = [UInt8](repeating: 0, count: 256) // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
+    private var subLayerLine = [UInt8](repeating: 0, count: 256)  // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
     private var pixelZ = [UInt8](repeating: 0, count: 256)  // z-order per pixel for priority compositing
     private var _renderingSubScreen = false
     private var _currentLayer: UInt8 = 0
@@ -402,27 +403,29 @@ final class PPU {
         renderLayers(mode: mode, layerMask: tm, hasOBJ: hasOBJ, scanline: y)
 
         // Color math: render subscreen and blend
-        let colorMathEnable = (cgwsel >> 4) & 0x03  // 0=always, 1=inside window, 2=outside window, 3=never
-        if colorMathEnable != 3 && cgadsub != 0 {
-            let subSource = (cgwsel >> 6) & 0x03  // 0,1=subscreen, 2,3=fixed color
+        if cgadsub != 0 {
+            let blendWithSubScreen = (cgwsel & 0x02) != 0
 
-            if subSource <= 1 && ts != 0 {
-                // Render subscreen layers to subScreenBuffer
+            if blendWithSubScreen {
+                // The subscreen always starts from backdrop for the current scanline.
                 for x in 0..<256 {
                     let idx = offset + x * 4
                     subScreenBuffer[idx + 0] = backdropR
                     subScreenBuffer[idx + 1] = backdropG
                     subScreenBuffer[idx + 2] = backdropB
                     subScreenBuffer[idx + 3] = 255
+                    subLayerLine[x] = 0
                 }
-                _renderingSubScreen = true
-                for i in 0..<256 { pixelZ[i] = 0 }
-                let subHasOBJ = (ts & 0x10) != 0
-                renderLayers(mode: mode, layerMask: ts, hasOBJ: subHasOBJ, scanline: y)
-                _renderingSubScreen = false
+                if ts != 0 {
+                    _renderingSubScreen = true
+                    for i in 0..<256 { pixelZ[i] = 0 }
+                    let subHasOBJ = (ts & 0x10) != 0
+                    renderLayers(mode: mode, layerMask: ts, hasOBJ: subHasOBJ, scanline: y)
+                    _renderingSubScreen = false
+                }
             }
 
-            applyColorMath(offset: offset, subSource: subSource)
+            applyColorMath(offset: offset, blendWithSubScreen: blendWithSubScreen)
         }
     }
 
@@ -462,16 +465,20 @@ final class PPU {
         }
     }
 
-    private func applyColorMath(offset: Int, subSource: UInt8) {
+    private func applyColorMath(offset: Int, blendWithSubScreen: Bool) {
+        let aboveMask = (cgwsel >> 6) & 0x03
+        let belowMask = (cgwsel >> 4) & 0x03
         let subtract = (cgadsub & 0x80) != 0
         let half = (cgadsub & 0x40) != 0
 
-        // Fixed color from COLDATA ($2132)
-        let fixedR = (coldata & 0x20) != 0 ? Int(coldata & 0x1F) << 3 : 0
-        let fixedG = (coldata & 0x40) != 0 ? Int(coldata & 0x1F) << 3 : 0
-        let fixedB = (coldata & 0x80) != 0 ? Int(coldata & 0x1F) << 3 : 0
-
         for x in 0..<256 {
+            // Window-gated color math is only applied where both masks allow it.
+            // This is a conservative approximation of the full above/below window logic.
+            guard colorWindowAllows(mask: aboveMask, screenX: x),
+                  colorWindowAllows(mask: belowMask, screenX: x) else {
+                continue
+            }
+
             let layer = mainLayerLine[x]
 
             // cgadsub bits: 0=BG1, 1=BG2, 2=BG3, 3=BG4, 4=OBJ, 5=backdrop
@@ -482,7 +489,7 @@ final class PPU {
             case 2: layerBit = 0x02  // BG2
             case 3: layerBit = 0x04  // BG3
             case 4: layerBit = 0x08  // BG4
-            case 5: layerBit = 0x10  // OBJ
+            case 6: layerBit = 0x10  // OBJ2 only
             default: continue
             }
 
@@ -494,13 +501,20 @@ final class PPU {
             let mainB = Int(backBuffer[idx + 2])
 
             let subR: Int, subG: Int, subB: Int
-            if subSource >= 2 {
-                subR = fixedR; subG = fixedG; subB = fixedB
-            } else {
+            let shouldHalf: Bool
+            if blendWithSubScreen {
                 let si = offset + x * 4
                 subR = Int(subScreenBuffer[si + 0])
                 subG = Int(subScreenBuffer[si + 1])
                 subB = Int(subScreenBuffer[si + 2])
+                // Real hardware only halves subscreen blends when the below pixel is
+                // an actual layer, not just the fixed/backdrop color path.
+                shouldHalf = half && subLayerLine[x] != 0
+            } else {
+                subR = Int(fixedColorR) << 3
+                subG = Int(fixedColorG) << 3
+                subB = Int(fixedColorB) << 3
+                shouldHalf = half
             }
 
             var r: Int, g: Int, b: Int
@@ -510,7 +524,7 @@ final class PPU {
                 r = mainR + subR; g = mainG + subG; b = mainB + subB
             }
 
-            if half { r >>= 1; g >>= 1; b >>= 1 }
+            if shouldHalf { r >>= 1; g >>= 1; b >>= 1 }
 
             backBuffer[idx + 0] = UInt8(max(0, min(255, r)))
             backBuffer[idx + 1] = UInt8(max(0, min(255, g)))
@@ -1065,7 +1079,8 @@ final class PPU {
                         let colorIdx = 128 + (palette - 8) * 16 + Int(pixel)
                         let (r, g, b) = colorFromCGRAM(index: colorIdx)
                         let idx = offset + screenX * 4
-                        writePixel(idx, screenX, r: r, g: g, b: b, z: spriteZ)
+                        let sourceLayer: UInt8 = palette >= 12 ? 6 : 5
+                        writePixel(idx, screenX, r: r, g: g, b: b, z: spriteZ, sourceLayer: sourceLayer)
                     }
                 }
             }
@@ -1087,19 +1102,68 @@ final class PPU {
 
     /// Write a pixel to the active render target with z-order priority check
     @inline(__always)
-    private func writePixel(_ idx: Int, _ screenX: Int, r: UInt8, g: UInt8, b: UInt8, z: UInt8 = 255) {
+    private func writePixel(_ idx: Int, _ screenX: Int, r: UInt8, g: UInt8, b: UInt8, z: UInt8 = 255, sourceLayer: UInt8? = nil) {
         guard z >= pixelZ[screenX] else { return }
         pixelZ[screenX] = z
+        let resolvedLayer = sourceLayer ?? _currentLayer
         if !_renderingSubScreen {
             if isWindowMasked(layer: Int(_currentLayer), screenX: screenX) { return }
             backBuffer[idx + 0] = r
             backBuffer[idx + 1] = g
             backBuffer[idx + 2] = b
-            mainLayerLine[screenX] = _currentLayer
+            mainLayerLine[screenX] = resolvedLayer
         } else {
             subScreenBuffer[idx + 0] = r
             subScreenBuffer[idx + 1] = g
             subScreenBuffer[idx + 2] = b
+            subLayerLine[screenX] = resolvedLayer
+        }
+    }
+
+    private func colorWindowInside(screenX: Int) -> Bool {
+        let raw = wobjsel >> 4
+        let wLog = (wobjlog >> 2) & 0x03
+        let x = screenX
+
+        let w1enabled = (raw & 0x02) != 0
+        let w1invert = (raw & 0x01) != 0
+        var w1inside = false
+        if w1enabled {
+            w1inside = x >= Int(wh0) && x <= Int(wh1)
+            if w1invert { w1inside.toggle() }
+        }
+
+        let w2enabled = (raw & 0x08) != 0
+        let w2invert = (raw & 0x04) != 0
+        var w2inside = false
+        if w2enabled {
+            w2inside = x >= Int(wh2) && x <= Int(wh3)
+            if w2invert { w2inside.toggle() }
+        }
+
+        if w1enabled && w2enabled {
+            switch wLog {
+            case 0: return w1inside || w2inside
+            case 1: return w1inside && w2inside
+            case 2: return w1inside != w2inside
+            case 3: return w1inside == w2inside
+            default: return false
+            }
+        } else if w1enabled {
+            return w1inside
+        } else if w2enabled {
+            return w2inside
+        }
+        return false
+    }
+
+    private func colorWindowAllows(mask: UInt8, screenX: Int) -> Bool {
+        switch mask {
+        case 0: return true
+        case 1: return colorWindowInside(screenX: screenX)
+        case 2: return !colorWindowInside(screenX: screenX)
+        case 3: return false
+        default: return false
         }
     }
 
