@@ -59,7 +59,11 @@ final class EmulatorViewModel: ObservableObject {
         }
     }
 
-    func loadROM(at url: URL) {
+    func loadROM(at url: URL, autoStart: Bool? = nil) {
+        let shouldAutoStart = autoStart ?? (isRunning || emulatorCore == nil)
+        shutdownCurrentSession()
+        renderer?.clearToBlack()
+
         do {
             let data = try Data(contentsOf: url)
             var cartridge = try Cartridge(data: data)
@@ -95,6 +99,9 @@ final class EmulatorViewModel: ObservableObject {
             let resetVector = core.bus.readWord(bank: 0x00, offset: 0xFFFC)
             print(String(format: "Reset vector: $%04X", resetVector))
 
+            if shouldAutoStart {
+                resumeEmulation()
+            }
         } catch {
             statusText = "Error: \(error.localizedDescription)"
             print("ROM load error: \(error)")
@@ -111,24 +118,9 @@ final class EmulatorViewModel: ObservableObject {
         guard let core = emulatorCore else { return }
 
         if core.isRunning {
-            core.stop()
-            isRunning = false
-            statusText = "Paused"
-            saveSRAM()
+            _ = pauseEmulation()
         } else {
-            core.isRunning = true
-            isRunning = true
-            statusText = "Running"
-            emulationThread = Thread {
-                core.run()
-                DispatchQueue.main.async {
-                    self.isRunning = core.isRunning
-                    self.statusText = core.isRunning ? "Running" : "Stopped"
-                }
-            }
-            emulationThread?.name = "EmulatorCore"
-            emulationThread?.qualityOfService = .userInteractive
-            emulationThread?.start()
+            resumeEmulation()
         }
     }
 
@@ -153,10 +145,7 @@ final class EmulatorViewModel: ObservableObject {
 
     func runBenchmark() {
         guard let core = emulatorCore else { return }
-        if core.isRunning {
-            core.stop()
-            isRunning = false
-        }
+        _ = pauseEmulation()
         statusText = "Benchmarking..."
         DispatchQueue.global(qos: .userInteractive).async {
             core.benchmark(frames: 120) // 2 seconds worth
@@ -178,19 +167,40 @@ final class EmulatorViewModel: ObservableObject {
         core.requestDiagnosis()
     }
 
+    @discardableResult
+    func pauseEmulation() -> Bool {
+        guard emulatorCore != nil else {
+            return false
+        }
+
+        let wasRunning = emulatorCore?.isRunning ?? false
+        if wasRunning {
+            emulatorCore?.stop()
+        }
+        waitForEmulationThreadToFinish()
+
+        if wasRunning {
+            isRunning = false
+            statusText = "Paused"
+            saveSRAM()
+        } else {
+            isRunning = false
+        }
+
+        return wasRunning
+    }
+
+    func resumeEmulation() {
+        guard let core = emulatorCore, !core.isRunning else { return }
+        startEmulationThread(for: core)
+    }
+
     func saveState() {
         guard let core = emulatorCore, let romURL = romURL else {
             statusText = "No ROM loaded"
             return
         }
-        let wasRunning = core.isRunning
-        if wasRunning {
-            core.stop()
-            // Wait for emulation thread to finish
-            while emulationThread?.isExecuting == true {
-                Thread.sleep(forTimeInterval: 0.001)
-            }
-        }
+        let wasRunning = pauseEmulation()
 
         let ss = SaveState()
         let data = ss.save(core: core)
@@ -204,18 +214,7 @@ final class EmulatorViewModel: ObservableObject {
         }
 
         if wasRunning {
-            core.isRunning = true
-            isRunning = true
-            emulationThread = Thread {
-                core.run()
-                DispatchQueue.main.async {
-                    self.isRunning = core.isRunning
-                    self.statusText = core.isRunning ? "Running" : "Stopped"
-                }
-            }
-            emulationThread?.name = "EmulatorCore"
-            emulationThread?.qualityOfService = .userInteractive
-            emulationThread?.start()
+            resumeEmulation()
         }
     }
 
@@ -224,13 +223,7 @@ final class EmulatorViewModel: ObservableObject {
             statusText = "No ROM loaded"
             return
         }
-        let wasRunning = core.isRunning
-        if wasRunning {
-            core.stop()
-            while emulationThread?.isExecuting == true {
-                Thread.sleep(forTimeInterval: 0.001)
-            }
-        }
+        let wasRunning = pauseEmulation()
 
         let stateURL = url ?? romURL.deletingPathExtension().appendingPathExtension("state")
         do {
@@ -245,18 +238,7 @@ final class EmulatorViewModel: ObservableObject {
         }
 
         if wasRunning {
-            core.isRunning = true
-            isRunning = true
-            emulationThread = Thread {
-                core.run()
-                DispatchQueue.main.async {
-                    self.isRunning = core.isRunning
-                    self.statusText = core.isRunning ? "Running" : "Stopped"
-                }
-            }
-            emulationThread?.name = "EmulatorCore"
-            emulationThread?.qualityOfService = .userInteractive
-            emulationThread?.start()
+            resumeEmulation()
         }
     }
 
@@ -273,6 +255,51 @@ final class EmulatorViewModel: ObservableObject {
 
     private static func clampRunAheadFrames(_ value: Int) -> Int {
         min(max(value, 0), 1)
+    }
+
+    private func shutdownCurrentSession() {
+        guard emulatorCore != nil else {
+            return
+        }
+
+        emulatorCore?.stop()
+        waitForEmulationThreadToFinish()
+        if romURL != nil {
+            saveSRAM()
+        }
+        emulatorCore?.renderer = nil
+        emulatorCore = nil
+        romURL = nil
+        isRunning = false
+        inputManager.attach(joypad: nil)
+
+        if let observer = terminationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            terminationObserver = nil
+        }
+    }
+
+    private func waitForEmulationThreadToFinish() {
+        while emulationThread?.isExecuting == true {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        emulationThread = nil
+    }
+
+    private func startEmulationThread(for core: EmulatorCore) {
+        core.isRunning = true
+        isRunning = true
+        statusText = "Running"
+        emulationThread = Thread {
+            core.run()
+            DispatchQueue.main.async {
+                self.isRunning = core.isRunning
+                self.statusText = core.isRunning ? "Running" : "Stopped"
+            }
+        }
+        emulationThread?.name = "EmulatorCore"
+        emulationThread?.qualityOfService = .userInteractive
+        emulationThread?.start()
     }
 
     private func persistDisplayConfiguration() {

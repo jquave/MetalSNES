@@ -184,6 +184,28 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         textureLock.unlock()
     }
 
+    func clearToBlack() {
+        let pixels = [UInt8](repeating: 0, count: width * height * 4)
+        pixels.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else {
+                return
+            }
+            let region = MTLRegion(
+                origin: MTLOrigin(x: 0, y: 0, z: 0),
+                size: MTLSize(width: width, height: height, depth: 1)
+            )
+            let readyTime = mach_absolute_time()
+            textureLock.lock()
+            let frameID = latestFrameID &+ 1
+            texture.replace(region: region, mipmapLevel: 0, withBytes: baseAddress, bytesPerRow: width * 4)
+            pendingFrameSource = .uploadedFramebuffer
+            latestFrameID = frameID
+            latestFrameReadyTime = readyTime
+            lastTextureFrameID = frameID
+            textureLock.unlock()
+        }
+    }
+
     func uploadFramebuffer(_ data: UnsafeRawPointer) {
         let region = MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
                                size: MTLSize(width: width, height: height, depth: 1))
@@ -288,6 +310,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         uniforms.contentOrigin = SIMD2(contentOriginX, contentOriginY)
         uniforms.contentSize = SIMD2(contentWidth, contentHeight)
         uniforms.integerScalingEnabled = displayConfiguration.integerScalingEnabled ? 1 : 0
+        uniforms.brightness = min(max(displayConfiguration.brightness, 0.4), 2.2)
+        uniforms.contrast = min(max(displayConfiguration.contrast, 0.4), 2.0)
+        uniforms.saturation = min(max(displayConfiguration.saturation, 0.0), 2.0)
+        uniforms.userSharpness = min(max(displayConfiguration.sharpness, 0.5), 1.8)
 
         switch displayConfiguration.filterMode {
         case .clean:
@@ -324,12 +350,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             uniforms.sharpness = 0.72
         case .phosphorHot:
             uniforms.filterMode = 4
-            uniforms.scanlineStrength = 0.30
-            uniforms.maskStrength = 0.44
-            uniforms.bloomStrength = 0.66
+            uniforms.scanlineStrength = 0.27
+            uniforms.maskStrength = 0.38
+            uniforms.bloomStrength = 0.86
             uniforms.curvature = 0
             uniforms.vignetteStrength = 0
-            uniforms.sharpness = 0.64
+            uniforms.sharpness = 0.56
         }
 
         return uniforms
@@ -389,9 +415,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return
         }
 
-        let now = mach_absolute_time()
         let statsGapResetThreshold = Timing.nanosecondsToMachAbsolute(100_000_000)
         textureLock.lock()
+        let now = mach_absolute_time()
         if pendingFrameSource == .gpuPPU, lastTextureFrameID != latestFrameID {
             encodePendingComputePass(into: commandBuffer)
             lastTextureFrameID = latestFrameID
@@ -412,7 +438,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 droppedFrames &+= latestFrameID - lastPresentedFrameID - 1
             }
 
-            let frameAge = now - latestFrameReadyTime
+            let frameAge = now >= latestFrameReadyTime ? now - latestFrameReadyTime : 0
             frameAgeSamples &+= 1
             frameAgeTotalNs += Timing.machAbsoluteToNanoseconds(frameAge)
             worstFrameAgeNs = max(worstFrameAgeNs, frameAge)

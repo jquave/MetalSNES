@@ -66,6 +66,7 @@ class KeyCaptureMTKView: MTKView {
 
 struct EmulatorView: NSViewRepresentable {
     @ObservedObject var viewModel: EmulatorViewModel
+    var onToggleFullScreen: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> MTKView {
         let mtkView = KeyCaptureMTKView()
@@ -76,7 +77,7 @@ struct EmulatorView: NSViewRepresentable {
         mtkView.preferredFramesPerSecond = NSScreen.main?.maximumFramesPerSecond ?? 60
         mtkView.enableSetNeedsDisplay = false
         mtkView.isPaused = !viewModel.isRunning
-        mtkView.onToggleFullScreen = {
+        mtkView.onToggleFullScreen = onToggleFullScreen ?? {
             (mtkView.window ?? NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
         }
 
@@ -94,7 +95,7 @@ struct EmulatorView: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {
         if let mtkView = nsView as? KeyCaptureMTKView {
             mtkView.inputManager = viewModel.inputManager
-            mtkView.onToggleFullScreen = {
+            mtkView.onToggleFullScreen = onToggleFullScreen ?? {
                 (mtkView.window ?? NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
             }
             viewModel.inputManager.attach(joypad: viewModel.emulatorCore?.bus.joypad)

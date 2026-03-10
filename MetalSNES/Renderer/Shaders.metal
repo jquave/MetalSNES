@@ -33,6 +33,10 @@ struct DisplayUniforms {
     float curvature;
     float vignetteStrength;
     float sharpness;
+    float brightness;
+    float contrast;
+    float saturation;
+    float userSharpness;
 };
 
 struct PixelSample {
@@ -71,6 +75,17 @@ vertex VertexOut vertexShader(uint vertexID [[vertex_id]]) {
 inline float gaussian1D(float distance, float sigma) {
     float safeSigma = max(sigma, 0.001);
     return exp(-0.5 * (distance * distance) / (safeSigma * safeSigma));
+}
+
+inline float3 applyDisplayGrade(float3 color,
+                                float brightness,
+                                float contrast,
+                                float saturation) {
+    float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    color = mix(float3(luma), color, saturation);
+    color = ((color - 0.5) * contrast) + 0.5;
+    color *= brightness;
+    return max(color, 0.0);
 }
 
 inline float3 sampleNearestRGB(texture2d<float> tex,
@@ -117,16 +132,16 @@ inline float3 trinitronCellMask(float localTexelX,
                                 float localTexelY,
                                 float strength) {
     float3 cells = float3(
-        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.26, 0.78, 4.0),
-        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.26, 0.78, 4.0),
-        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.26, 0.78, 4.0)
+        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.29, 0.82, 4.0),
+        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.29, 0.82, 4.0),
+        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.29, 0.82, 4.0)
     );
     float3 glow = float3(
-        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.40, 0.96, 2.0),
-        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.40, 0.96, 2.0),
-        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.40, 0.96, 2.0)
+        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.54, 1.10, 2.0),
+        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.54, 1.10, 2.0),
+        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.54, 1.10, 2.0)
     );
-    cells = clamp(cells + glow * 0.30, 0.0, 1.0);
+    cells = clamp(cells + glow * 0.44, 0.0, 1.0);
     return mix(float3(1.0 - strength), float3(1.0), cells);
 }
 
@@ -146,14 +161,19 @@ inline float3 samplePhosphorBloom(texture2d<float> tex,
                                   float haloThreshold,
                                   float haloScale,
                                   float sparkScale,
-                                  float highlightThreshold) {
+                                  float highlightThreshold,
+                                  bool wideSupport) {
     float2 texelSpace = sampleUV * textureSize;
     float2 center = floor(texelSpace) + 0.5;
+    int minY = wideSupport ? -2 : -1;
+    int maxY = wideSupport ? 2 : 1;
+    int minX = wideSupport ? -3 : -2;
+    int maxX = wideSupport ? 3 : 2;
 
     float3 accum = float3(0.0);
     float total = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -2; x <= 2; ++x) {
+    for (int y = minY; y <= maxY; ++y) {
+        for (int x = minX; x <= maxX; ++x) {
             float2 sampleCoord = center + float2(float(x), float(y));
             float2 delta = texelSpace - sampleCoord;
             float weight = gaussian1D(delta.x, sigmaX) * gaussian1D(delta.y, sigmaY);
@@ -168,10 +188,24 @@ inline float3 samplePhosphorBloom(texture2d<float> tex,
         sampleNearestRGB(tex, texSampler, textureSize, center + float2(-1.0, 0.0)) +
         sampleNearestRGB(tex, texSampler, textureSize, center + float2(1.0, 0.0))
     ) * 0.5;
+    float3 farLateral = (
+        sampleNearestRGB(tex, texSampler, textureSize, center + float2(-2.0, 0.0)) +
+        sampleNearestRGB(tex, texSampler, textureSize, center + float2(2.0, 0.0))
+    ) * 0.5;
+    float3 vertical = (
+        sampleNearestRGB(tex, texSampler, textureSize, center + float2(0.0, -1.0)) +
+        sampleNearestRGB(tex, texSampler, textureSize, center + float2(0.0, 1.0))
+    ) * 0.5;
     float highlight = smoothstep(highlightThreshold, 1.0, max(max(direct.r, direct.g), direct.b));
     float3 halo = max(beam - haloThreshold, 0.0) * haloScale * mix(0.65, 1.35, highlight);
     float3 spark = max(lateral - max(haloThreshold - 0.05, 0.02), 0.0) * sparkScale * mix(0.45, 1.15, highlight);
-    return mix(direct, beam, beamMix) + halo + spark;
+    float3 spill = float3(0.0);
+    if (wideSupport) {
+        float3 outerRing = farLateral * 0.72 + vertical * 0.42;
+        spill = max(outerRing - max(haloThreshold - 0.08, 0.01), 0.0) * (sparkScale * 1.15) * mix(0.45, 1.30, highlight);
+        halo *= 1.14;
+    }
+    return mix(direct, beam, beamMix) + halo + spark + spill;
 }
 
 fragment float4 fragmentShader(VertexOut in [[stage_in]],
@@ -204,19 +238,25 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
     float2 texelCoord = sampleUV * uniforms.textureSize;
     float2 nearestUV = (floor(texelCoord) + 0.5) * texelSize;
     float4 color = tex.sample(nearestSampler, nearestUV);
+    float displayBrightness = clamp(uniforms.brightness, 0.4, 2.2);
+    float displayContrast = clamp(uniforms.contrast, 0.4, 2.0);
+    float displaySaturation = clamp(uniforms.saturation, 0.0, 2.0);
+    float filterSharpness = max(uniforms.sharpness * uniforms.userSharpness, 0.05);
 
     if (uniforms.filterMode == 0u) {
-        return color;
+        color.rgb = applyDisplayGrade(color.rgb, displayBrightness, displayContrast, displaySaturation);
+        return float4(min(color.rgb, 1.0), color.a);
     }
 
     if (uniforms.filterMode == 3u || uniforms.filterMode == 4u) {
         bool hotPhosphor = uniforms.filterMode == 4u;
-        float focus = clamp(uniforms.sharpness, 0.0, 1.0);
+        float focus = clamp(filterSharpness, 0.0, 1.0);
+        float glowBoost = max(displayBrightness - 1.0, 0.0);
         float sigmaX = hotPhosphor
-            ? mix(1.36, 0.96, focus)
+            ? mix(1.78, 1.22, focus) + glowBoost * 0.34
             : mix(1.05, 0.62, focus);
         float sigmaY = hotPhosphor
-            ? mix(0.86, 0.54, focus)
+            ? mix(1.08, 0.68, focus) + glowBoost * 0.22
             : mix(0.78, 0.46, focus);
         float3 phosphor = samplePhosphorBloom(
             tex,
@@ -225,11 +265,16 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
             uniforms.textureSize,
             sigmaX,
             sigmaY,
-            hotPhosphor ? 0.76 : 0.78,
-            hotPhosphor ? 0.12 : 0.18,
-            hotPhosphor ? (0.30 + uniforms.bloomStrength * 0.40) : (0.30 + uniforms.bloomStrength * 0.45),
-            hotPhosphor ? uniforms.bloomStrength * 0.24 : uniforms.bloomStrength * 0.22,
-            hotPhosphor ? 0.42 : 0.55
+            hotPhosphor ? min(0.92, 0.84 + glowBoost * 0.06) : min(0.88, 0.78 + glowBoost * 0.04),
+            hotPhosphor ? 0.08 : 0.18,
+            hotPhosphor
+                ? (0.44 + uniforms.bloomStrength * 0.58) * (1.0 + glowBoost * 1.15)
+                : (0.30 + uniforms.bloomStrength * 0.45) * (1.0 + glowBoost * 0.75),
+            hotPhosphor
+                ? uniforms.bloomStrength * 0.38 * (1.0 + glowBoost * 1.35)
+                : uniforms.bloomStrength * 0.22 * (1.0 + glowBoost * 0.80),
+            hotPhosphor ? 0.34 : 0.55,
+            hotPhosphor
         );
         if (hotPhosphor) {
             float texelScaleX = max(uniforms.contentSize.x / uniforms.textureSize.x, 1.0);
@@ -239,15 +284,15 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
             float3 cellMask = trinitronCellMask(localTexelX, localTexelY, uniforms.maskStrength);
             float lineMask = trinitronScanlineMask(localTexelY, uniforms.scanlineStrength);
             float beamLuma = dot(phosphor, float3(0.2126, 0.7152, 0.0722));
-            float highlightGlow = smoothstep(0.52, 1.0, beamLuma);
-            float grayPedestal = 0.012 + beamLuma * 0.060;
+            float highlightGlow = smoothstep(0.40, 1.0, beamLuma);
+            float grayPedestal = (0.020 + beamLuma * 0.085) * (1.0 + glowBoost * 0.55);
 
             phosphor *= cellMask;
             phosphor *= lineMask;
-            phosphor += (float3(grayPedestal) * (float3(0.55) + cellMask * 0.45)) * lineMask;
-            phosphor += float3(highlightGlow * beamLuma * 0.11);
-            phosphor += max(phosphor - 0.18, 0.0) * 0.14;
-            phosphor = pow(max(phosphor, 0.0), float3(0.93));
+            phosphor += (float3(grayPedestal) * (float3(0.60) + cellMask * 0.50)) * lineMask;
+            phosphor += float3(highlightGlow * beamLuma * (0.17 + glowBoost * 0.12));
+            phosphor += max(phosphor - 0.12, 0.0) * (0.24 + glowBoost * 0.18);
+            phosphor = pow(max(phosphor, 0.0), float3(0.88));
         } else {
             float3 mask = apertureGrilleMask(
                 screenPos.x - rectMin.x,
@@ -259,6 +304,7 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
             phosphor *= mask;
             phosphor = pow(max(phosphor, 0.0), float3(0.95));
         }
+        phosphor = applyDisplayGrade(phosphor, displayBrightness, displayContrast, displaySaturation);
         return float4(min(phosphor, 1.0), 1.0);
     }
 
@@ -273,7 +319,7 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
 
     float scaleY = max(uniforms.contentSize.y / uniforms.textureSize.y, 1.0);
     float scanPhase = fract((screenPos.y - rectMin.y) / scaleY);
-    float beam = 1.0 - uniforms.scanlineStrength * pow(abs(scanPhase - 0.5) * 2.0, max(uniforms.sharpness, 1.0));
+    float beam = 1.0 - uniforms.scanlineStrength * pow(abs(scanPhase - 0.5) * 2.0, max(filterSharpness, 1.0));
     color.rgb *= beam;
 
     if (uniforms.maskStrength > 0.0) {
@@ -296,7 +342,8 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
         color.rgb *= mix(1.0, vignette, uniforms.vignetteStrength);
     }
 
-    return float4(color.rgb, 1.0);
+    color.rgb = applyDisplayGrade(color.rgb, displayBrightness, displayContrast, displaySaturation);
+    return float4(min(color.rgb, 1.0), 1.0);
 }
 
 inline uchar readVRAM(const device uchar *vram, uint addr) {

@@ -5,6 +5,11 @@ struct ContentView: View {
     @State private var showDebug = false
     @State private var showDisplaySettings = false
     @State private var showInputSettings = false
+    @State private var trackedWindow: NSWindow?
+    @State private var isFullScreen = false
+    @State private var headerVisible = true
+    @State private var headerHovering = false
+    @State private var headerHideWorkItem: DispatchWorkItem?
 
     var body: some View {
         ZStack {
@@ -19,80 +24,49 @@ struct ContentView: View {
             .ignoresSafeArea()
 
             HSplitView {
-                VStack(spacing: 18) {
-                    headerPanel
-                    displayStage
-                    controlDeck
-                }
-                .padding(20)
-                .frame(minWidth: 760, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                mainStage
+                    .frame(minWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
 
                 if showDebug {
                     debugPanel
-                        .padding(.vertical, 20)
-                        .padding(.trailing, 20)
+                        .padding(.vertical, outerPadding)
+                        .padding(.trailing, outerPadding)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .toolbar {
-            ToolbarItem {
-                Button("Open ROM") {
-                    openROM()
-                }
-            }
-            ToolbarItem {
-                Button("Display") {
-                    showDisplaySettings = true
-                }
-            }
-            ToolbarItem {
-                Button("Input") {
-                    showInputSettings = true
-                }
-            }
-            ToolbarItem {
-                Menu("Tools") {
-                    Button("Run CPU Tests") {
-                        runCPUTests()
-                    }
-                    Button("Run PPU Test") {
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            PPUDiagnostic.runAll()
-                        }
-                    }
-                    Button("Benchmark") {
-                        viewModel.runBenchmark()
-                    }
-                    Divider()
-                    Button("Save State") {
-                        viewModel.saveState()
-                    }
-                    .keyboardShortcut("1", modifiers: .command)
-                    Button("Load State") {
-                        viewModel.loadState()
-                    }
-                    .keyboardShortcut("2", modifiers: .command)
-                    Button("Diagnose") {
-                        viewModel.diagnoseFreeze()
-                    }
-                }
-            }
-            ToolbarItem {
-                Toggle("Debug", isOn: $showDebug)
-            }
-        }
-        .sheet(isPresented: $showDisplaySettings) {
-            DisplayConfigurationView(
-                viewModel: viewModel,
-                onToggleFullScreen: toggleFullScreen
+        .background(
+            WindowObserver(
+                window: $trackedWindow,
+                isFullScreen: $isFullScreen,
+                onWindowReady: configureWindow
             )
-        }
+            .frame(width: 0, height: 0)
+        )
         .sheet(isPresented: $showInputSettings) {
             InputConfigurationView(inputManager: viewModel.inputManager)
         }
         .onChange(of: showDebug) { _, isShown in
             viewModel.setDebugUIEnabled(isShown)
+            if isShown {
+                revealHeader()
+            }
+            refreshHeaderVisibility()
+        }
+        .onChange(of: viewModel.isRunning) { _, _ in
+            refreshHeaderVisibility()
+        }
+        .onChange(of: showDisplaySettings) { _, isShown in
+            if isShown {
+                revealHeader()
+            }
+            refreshHeaderVisibility()
+        }
+        .onChange(of: showInputSettings) { _, isShown in
+            if isShown {
+                revealHeader()
+            }
+            refreshHeaderVisibility()
         }
         .onAppear {
             let args = ProcessInfo.processInfo.arguments
@@ -124,119 +98,184 @@ struct ContentView: View {
                     }
                 }
             }
+
+            refreshHeaderVisibility()
         }
+    }
+
+    private var mainStage: some View {
+        ZStack(alignment: .top) {
+            RoundedRectangle(cornerRadius: stageCornerRadius, style: .continuous)
+                .fill(Color.black)
+                .shadow(color: Color.black.opacity(isFullScreen ? 0 : 0.22), radius: 32, x: 0, y: 24)
+
+            EmulatorView(viewModel: viewModel, onToggleFullScreen: toggleFullScreen)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: max(stageCornerRadius - stageInset, 0), style: .continuous))
+                .padding(stageInset)
+
+            headerPanel
+                .padding(stageHeaderPadding)
+                .opacity(headerDisplayVisible ? 1 : 0)
+                .offset(y: headerDisplayVisible ? 0 : -30)
+                .allowsHitTesting(headerDisplayVisible)
+
+            if showDisplaySettings {
+                displayControlPanel
+                    .padding(.top, headerDisplayVisible ? 108 : stageHeaderPadding)
+                    .padding(.trailing, stageHeaderPadding)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(2)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: stageCornerRadius, style: .continuous))
+        .padding(outerPadding)
+        .frame(maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: headerDisplayVisible)
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(_):
+                handlePointerActivity()
+            case .ended:
+                scheduleHeaderHideIfNeeded()
+            }
+        }
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                handlePointerActivity()
+            }
+        )
+    }
+
+    private var displayControlPanel: some View {
+        DisplayConfigurationView(
+            viewModel: viewModel,
+            onToggleFullScreen: toggleFullScreen,
+            onClose: {
+                showDisplaySettings = false
+                refreshHeaderVisibility()
+            }
+        )
+        .frame(width: min(trackedWindow?.contentLayoutRect.width ?? 420, 440))
+        .shadow(color: Color.black.opacity(0.28), radius: 20, x: 0, y: 16)
     }
 
     private var headerPanel: some View {
-        HStack(alignment: .top, spacing: 18) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("MetalSNES")
-                    .font(.system(size: 30, weight: .black, design: .rounded))
-                    .foregroundStyle(Color(red: 0.13, green: 0.18, blue: 0.18))
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(viewModel.romDisplayName)
-                    .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.28, green: 0.32, blue: 0.28))
-                Text(viewModel.statusText)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 10) {
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white)
                 HStack(spacing: 8) {
-                    MetricPill(label: "Filter", value: viewModel.displayConfiguration.filterMode.displayName)
-                    MetricPill(label: "Scale", value: viewModel.displayConfiguration.integerScalingEnabled ? "Integer" : "Fit")
-                    MetricPill(label: "Latency", value: viewModel.runAheadFrames == 0 ? "Native" : "1F Run-Ahead")
+                    Text("MetalSNES")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.72))
+                    Text(viewModel.statusText)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color.white.opacity(0.88))
                 }
-                Text("Display-linked pacing, pixel framing, and low-latency input.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
             }
-        }
-        .padding(20)
-        .background(panelBackground)
-        .overlay(panelStroke)
-    }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
 
-    private var displayStage: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(Color(red: 0.03, green: 0.03, blue: 0.04))
-                .shadow(color: Color.black.opacity(0.18), radius: 28, x: 0, y: 20)
-
-            EmulatorView(viewModel: viewModel)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                .padding(18)
+            HStack(spacing: 10) {
+                filterMenu
+                scaleMenu
+                latencyMenu
+            }
 
             HStack(spacing: 8) {
-                MetricPill(label: "View", value: viewModel.displayConfiguration.filterMode.displayName)
-                MetricPill(label: "Pixels", value: viewModel.displayConfiguration.integerScalingEnabled ? "Locked" : "Adaptive")
-                if viewModel.isRunning {
-                    MetricPill(label: "State", value: "Live")
-                } else {
-                    MetricPill(label: "State", value: "Paused")
-                }
-            }
-            .padding(16)
-        }
-        .frame(maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
-    }
-
-    private var controlDeck: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 10) {
                 Button(viewModel.isRunning ? "Pause" : "Run") {
                     viewModel.toggleEmulation()
+                    handlePointerActivity()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.22, green: 0.43, blue: 0.32))
+                .buttonStyle(HeaderActionButtonStyle(prominent: true))
                 .keyboardShortcut(.space, modifiers: [])
 
-                Button("Step") {
-                    viewModel.step()
+                Button("Open ROM") {
+                    openROM()
                 }
-                .buttonStyle(.bordered)
-                .disabled(viewModel.isRunning)
-                .keyboardShortcut("s", modifiers: .command)
+                .buttonStyle(HeaderActionButtonStyle())
 
-                Button("Full Screen") {
-                    toggleFullScreen()
+                Button("Save") {
+                    viewModel.saveState()
+                    handlePointerActivity()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(HeaderActionButtonStyle())
+                .keyboardShortcut("1", modifiers: .command)
+
+                Button("Load") {
+                    viewModel.loadState()
+                    handlePointerActivity()
+                }
+                .buttonStyle(HeaderActionButtonStyle())
+                .keyboardShortcut("2", modifiers: .command)
+
+                Button {
+                    toggleFullScreen()
+                    handlePointerActivity()
+                } label: {
+                    Image(systemName: isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(HeaderIconButtonStyle())
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("Toggle full screen (F or Command-Return)")
-            }
 
-            Spacer()
-
-            HStack(spacing: 10) {
-                Button("Display") {
-                    showDisplaySettings = true
-                }
-                .buttonStyle(.bordered)
-
-                Button("Input") {
-                    showInputSettings = true
-                }
-                .buttonStyle(.bordered)
-
-                Menu("State") {
-                    Button("Save State") {
-                        viewModel.saveState()
+                Menu {
+                    Button(showDisplaySettings ? "Hide Display Controls" : "Show Display Controls") {
+                        toggleDisplaySettings()
                     }
-                    .keyboardShortcut("1", modifiers: .command)
-                    Button("Load State") {
-                        viewModel.loadState()
+                    Button("Input Settings") {
+                        showDisplaySettings = false
+                        showInputSettings = true
                     }
-                    .keyboardShortcut("2", modifiers: .command)
+                    Divider()
+                    Button(showDebug ? "Hide Debug Panel" : "Show Debug Panel") {
+                        showDebug.toggle()
+                    }
+                    Divider()
+                    Button("Step") {
+                        viewModel.step()
+                    }
+                    .disabled(viewModel.isRunning)
+                    .keyboardShortcut("s", modifiers: .command)
+                    Button("Run CPU Tests") {
+                        runCPUTests()
+                    }
+                    Button("Run PPU Test") {
+                        runPPUTests()
+                    }
+                    Button("Benchmark") {
+                        viewModel.runBenchmark()
+                    }
+                    Button("Diagnose") {
+                        viewModel.diagnoseFreeze()
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal")
                 }
+                .menuStyle(.borderlessButton)
+                .buttonStyle(HeaderIconButtonStyle())
+                .help("Tools")
             }
         }
         .padding(16)
-        .background(panelBackground)
-        .overlay(panelStroke)
+        .background(HeaderGlassBackground())
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 22, x: 0, y: 18)
+        .onHover { isHovering in
+            headerHovering = isHovering
+            if isHovering {
+                revealHeader()
+            } else {
+                scheduleHeaderHideIfNeeded()
+            }
+        }
     }
 
     private var debugPanel: some View {
@@ -257,12 +296,140 @@ struct ContentView: View {
             .strokeBorder(Color.white.opacity(0.65), lineWidth: 1)
     }
 
+    private var outerPadding: CGFloat {
+        isFullScreen ? 0 : 20
+    }
+
+    private var stageInset: CGFloat {
+        isFullScreen ? 0 : 16
+    }
+
+    private var stageCornerRadius: CGFloat {
+        isFullScreen ? 0 : 30
+    }
+
+    private var stageHeaderPadding: CGFloat {
+        isFullScreen ? 18 : 20
+    }
+
+    private var headerDisplayVisible: Bool {
+        headerVisible || !shouldAutoHideHeader
+    }
+
+    private var shouldAutoHideHeader: Bool {
+        viewModel.isRunning && !showDisplaySettings && !showInputSettings
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            ForEach(DisplayFilterMode.allCases) { mode in
+                Button {
+                    viewModel.displayConfiguration.filterMode = mode
+                    handlePointerActivity()
+                } label: {
+                    HStack {
+                        Text(mode.displayName)
+                        if viewModel.displayConfiguration.filterMode == mode {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button(showDisplaySettings ? "Hide Display Controls" : "Show Display Controls") {
+                toggleDisplaySettings()
+            }
+        } label: {
+            HeaderStatusPill(label: "Filter", value: viewModel.displayConfiguration.filterMode.displayName)
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var scaleMenu: some View {
+        Menu {
+            Button {
+                viewModel.displayConfiguration.integerScalingEnabled = true
+                handlePointerActivity()
+            } label: {
+                HStack {
+                    Text("Integer")
+                    if viewModel.displayConfiguration.integerScalingEnabled {
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Button {
+                viewModel.displayConfiguration.integerScalingEnabled = false
+                handlePointerActivity()
+            } label: {
+                HStack {
+                    Text("Fit")
+                    if !viewModel.displayConfiguration.integerScalingEnabled {
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+        } label: {
+            HeaderStatusPill(label: "Scale", value: viewModel.displayConfiguration.integerScalingEnabled ? "Integer" : "Fit")
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private var latencyMenu: some View {
+        Menu {
+            Button {
+                viewModel.runAheadFrames = 0
+                handlePointerActivity()
+            } label: {
+                HStack {
+                    Text("Native")
+                    if viewModel.runAheadFrames == 0 {
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+            Button {
+                viewModel.runAheadFrames = 1
+                handlePointerActivity()
+            } label: {
+                HStack {
+                    Text("1F Run-Ahead")
+                    if viewModel.runAheadFrames == 1 {
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+        } label: {
+            HeaderStatusPill(label: "Latency", value: viewModel.runAheadFrames == 0 ? "Native" : "1F Run-Ahead")
+        }
+        .menuStyle(.borderlessButton)
+    }
+
     private func openROM() {
+        let shouldResume = viewModel.pauseEmulation()
+        let shouldAutoStart = shouldResume || viewModel.emulatorCore == nil
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.data]
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url {
-            viewModel.loadROM(at: url)
+
+        let handleSelection: (NSApplication.ModalResponse) -> Void = { response in
+            if response == .OK, let url = panel.url {
+                viewModel.loadROM(at: url, autoStart: shouldAutoStart)
+            } else if shouldResume {
+                viewModel.resumeEmulation()
+            }
+            refreshHeaderVisibility()
+        }
+
+        if let trackedWindow {
+            panel.beginSheetModal(for: trackedWindow, completionHandler: handleSelection)
+        } else {
+            handleSelection(panel.runModal())
         }
     }
 
@@ -280,6 +447,12 @@ struct ContentView: View {
                 }
             }
             print("Test ROMs not found. Clone PeterLemon/SNES into TestROMs/PeterLemon/")
+        }
+    }
+
+    private func runPPUTests() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            PPUDiagnostic.runAll()
         }
     }
 
@@ -305,11 +478,72 @@ struct ContentView: View {
     }
 
     private func toggleFullScreen() {
-        (NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
+        (trackedWindow ?? NSApp.keyWindow ?? NSApp.windows.first)?.toggleFullScreen(nil)
+    }
+
+    private func toggleDisplaySettings() {
+        if showDisplaySettings {
+            showDisplaySettings = false
+        } else {
+            showDisplaySettings = true
+            revealHeader()
+        }
+        refreshHeaderVisibility()
+    }
+
+    private func configureWindow(_ window: NSWindow) {
+        window.title = ""
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbar = nil
+        window.isMovableByWindowBackground = true
+        window.styleMask.insert(.fullSizeContentView)
+    }
+
+    private func handlePointerActivity() {
+        revealHeader()
+        scheduleHeaderHideIfNeeded()
+    }
+
+    private func revealHeader() {
+        cancelHeaderHide()
+        if !headerVisible {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                headerVisible = true
+            }
+        }
+    }
+
+    private func refreshHeaderVisibility() {
+        if shouldAutoHideHeader {
+            scheduleHeaderHideIfNeeded()
+        } else {
+            revealHeader()
+        }
+    }
+
+    private func scheduleHeaderHideIfNeeded() {
+        cancelHeaderHide()
+        guard shouldAutoHideHeader, !headerHovering else {
+            return
+        }
+
+        let workItem = DispatchWorkItem {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                headerVisible = false
+            }
+        }
+        headerHideWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8, execute: workItem)
+    }
+
+    private func cancelHeaderHide() {
+        headerHideWorkItem?.cancel()
+        headerHideWorkItem = nil
     }
 }
 
-struct MetricPill: View {
+struct HeaderStatusPill: View {
     let label: String
     let value: String
 
@@ -317,83 +551,253 @@ struct MetricPill: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label.uppercased())
                 .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.55))
             Text(value)
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.18, green: 0.23, blue: 0.21))
+                .foregroundStyle(Color.white)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(
             Capsule()
-                .fill(Color.white.opacity(0.75))
+                .fill(Color.white.opacity(0.12))
         )
+    }
+}
+
+struct HeaderGlassBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .background(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(Color.black.opacity(0.34))
+            )
+    }
+}
+
+struct HeaderActionButtonStyle: ButtonStyle {
+    var prominent = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                Capsule()
+                    .fill(prominent ? Color(red: 0.23, green: 0.52, blue: 0.38) : Color.white.opacity(configuration.isPressed ? 0.20 : 0.12))
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+    }
+}
+
+struct HeaderIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(Color.white)
+            .frame(width: 34, height: 34)
+            .background(
+                Circle()
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.20 : 0.12))
+            )
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+    }
+}
+
+struct WindowObserver: NSViewRepresentable {
+    @Binding var window: NSWindow?
+    @Binding var isFullScreen: Bool
+    let onWindowReady: (NSWindow) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.parent = self
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: nsView.window)
+        }
+    }
+
+    final class Coordinator {
+        var parent: WindowObserver
+        private weak var observedWindow: NSWindow?
+        private var observers: [Any] = []
+
+        init(_ parent: WindowObserver) {
+            self.parent = parent
+        }
+
+        deinit {
+            removeObservers()
+        }
+
+        func attach(to window: NSWindow?) {
+            guard let window else {
+                return
+            }
+
+            if observedWindow === window {
+                updateBindings(for: window)
+                return
+            }
+
+            removeObservers()
+            observedWindow = window
+            observe(window)
+            updateBindings(for: window)
+        }
+
+        private func observe(_ window: NSWindow) {
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.updateBindings(for: window)
+                },
+                center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.updateBindings(for: window)
+                },
+                center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.updateBindings(for: window)
+                }
+            ]
+        }
+
+        private func updateBindings(for window: NSWindow) {
+            parent.window = window
+            parent.isFullScreen = window.styleMask.contains(.fullScreen)
+            parent.onWindowReady(window)
+        }
+
+        private func removeObservers() {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observers.removeAll()
+        }
     }
 }
 
 struct DisplayConfigurationView: View {
     @ObservedObject var viewModel: EmulatorViewModel
     let onToggleFullScreen: () -> Void
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Display")
-                        .font(.system(size: 28, weight: .black, design: .rounded))
-                    Text("Pixel framing, fullscreen presentation, post-processing, and latency tuning.")
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Display Controls")
+                        .font(.system(size: 22, weight: .black, design: .rounded))
+                    Text("Tune the live image without covering the game.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Done") {
-                    dismiss()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
+                .help("Close display controls")
             }
 
-            GroupBox {
+            ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Toggle("Integer Scaling", isOn: $viewModel.displayConfiguration.integerScalingEnabled)
-                    Text("Locks the final pass to whole-number pixel multiples and adds clean letterboxing when needed.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 14) {
+                            Toggle("Integer Scaling", isOn: $viewModel.displayConfiguration.integerScalingEnabled)
+                            Text("Locks the final pass to whole-number pixel multiples and adds clean letterboxing when needed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } label: {
+                        Text("Screen")
+                    }
 
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Filter")
-                            .font(.headline)
-                        ForEach(DisplayFilterMode.allCases) { mode in
-                            DisplayFilterModeCard(
-                                mode: mode,
-                                isSelected: viewModel.displayConfiguration.filterMode == mode
-                            ) {
-                                viewModel.displayConfiguration.filterMode = mode
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Filter")
+                                .font(.headline)
+                            ForEach(DisplayFilterMode.allCases) { mode in
+                                DisplayFilterModeCard(
+                                    mode: mode,
+                                    isSelected: viewModel.displayConfiguration.filterMode == mode
+                                ) {
+                                    viewModel.displayConfiguration.filterMode = mode
+                                }
                             }
                         }
+                    } label: {
+                        Text("Filter")
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            DisplayAdjustmentSlider(
+                                title: "Brightness",
+                                value: binding(for: \.brightness),
+                                range: 0.4...2.2,
+                                valueLabel: percentageLabel(for: binding(for: \.brightness).wrappedValue),
+                                detail: "Global luminance. On Aperture Bloom and Trinitron, higher brightness also drives more glow and bloom."
+                            )
+
+                            DisplayAdjustmentSlider(
+                                title: "Contrast",
+                                value: binding(for: \.contrast),
+                                range: 0.4...2.0,
+                                valueLabel: percentageLabel(for: binding(for: \.contrast).wrappedValue),
+                                detail: "Expands or compresses the light-dark separation after filtering."
+                            )
+
+                            DisplayAdjustmentSlider(
+                                title: "Sharpness",
+                                value: binding(for: \.sharpness),
+                                range: 0.5...1.8,
+                                valueLabel: percentageLabel(for: binding(for: \.sharpness).wrappedValue),
+                                detail: "Adjusts beam focus and edge crispness across the post-processing filters."
+                            )
+
+                            DisplayAdjustmentSlider(
+                                title: "Saturation",
+                                value: binding(for: \.saturation),
+                                range: 0.0...2.0,
+                                valueLabel: percentageLabel(for: binding(for: \.saturation).wrappedValue),
+                                detail: "Controls color intensity from grayscale to heavily boosted phosphor color."
+                            )
+                        }
+                    } label: {
+                        Text("Image")
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Picker("Run Ahead", selection: $viewModel.runAheadFrames) {
+                                Text("Off").tag(0)
+                                Text("1 Frame").tag(1)
+                            }
+                            .pickerStyle(.segmented)
+
+                            Text("Run-ahead reduces input latency by speculating one frame ahead. It helps responsiveness, not animation smoothness.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } label: {
+                        Text("Latency")
                     }
                 }
-            } label: {
-                Text("Screen")
             }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("Run Ahead", selection: $viewModel.runAheadFrames) {
-                        Text("Off").tag(0)
-                        Text("1 Frame").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-
-                    Text("Run-ahead reduces input latency by speculating one frame ahead. It helps responsiveness, not animation smoothness.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } label: {
-                Text("Latency")
-            }
+            .frame(maxHeight: 520)
 
             HStack {
                 Button("Toggle Full Screen") {
@@ -409,18 +813,35 @@ struct DisplayConfigurationView: View {
                 .buttonStyle(.bordered)
             }
         }
-        .padding(24)
-        .frame(minWidth: 680, minHeight: 520)
+        .padding(18)
+        .frame(width: 420)
         .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 0.96, green: 0.95, blue: 0.90),
-                    Color(red: 0.88, green: 0.91, blue: 0.86)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .background(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(Color.black.opacity(0.38))
+                )
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+        )
+    }
+
+    private func binding(for keyPath: WritableKeyPath<DisplayConfiguration, Float>) -> Binding<Double> {
+        Binding(
+            get: {
+                Double(viewModel.displayConfiguration[keyPath: keyPath])
+            },
+            set: { newValue in
+                viewModel.displayConfiguration[keyPath: keyPath] = Float(newValue)
+            }
+        )
+    }
+
+    private func percentageLabel(for value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
     }
 }
 
@@ -450,6 +871,38 @@ struct DisplayFilterModeCard: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct DisplayAdjustmentSlider: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let valueLabel: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(valueLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Slider(value: $value, in: range)
+
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.58))
+        )
     }
 }
 

@@ -38,10 +38,63 @@ enum DisplayFilterMode: String, CaseIterable, Codable, Identifiable {
 struct DisplayConfiguration: Codable, Equatable {
     var integerScalingEnabled: Bool
     var filterMode: DisplayFilterMode
+    var brightness: Float
+    var contrast: Float
+    var sharpness: Float
+    var saturation: Float
+
+    init(
+        integerScalingEnabled: Bool,
+        filterMode: DisplayFilterMode,
+        brightness: Float = 1.0,
+        contrast: Float = 1.0,
+        sharpness: Float = 1.0,
+        saturation: Float = 1.0
+    ) {
+        self.integerScalingEnabled = integerScalingEnabled
+        self.filterMode = filterMode
+        self.brightness = brightness
+        self.contrast = contrast
+        self.sharpness = sharpness
+        self.saturation = saturation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case integerScalingEnabled
+        case filterMode
+        case brightness
+        case contrast
+        case sharpness
+        case saturation
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        integerScalingEnabled = try container.decode(Bool.self, forKey: .integerScalingEnabled)
+        filterMode = try container.decode(DisplayFilterMode.self, forKey: .filterMode)
+        brightness = try container.decodeIfPresent(Float.self, forKey: .brightness) ?? 1.0
+        contrast = try container.decodeIfPresent(Float.self, forKey: .contrast) ?? 1.0
+        sharpness = try container.decodeIfPresent(Float.self, forKey: .sharpness) ?? 1.0
+        saturation = try container.decodeIfPresent(Float.self, forKey: .saturation) ?? 1.0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(integerScalingEnabled, forKey: .integerScalingEnabled)
+        try container.encode(filterMode, forKey: .filterMode)
+        try container.encode(brightness, forKey: .brightness)
+        try container.encode(contrast, forKey: .contrast)
+        try container.encode(sharpness, forKey: .sharpness)
+        try container.encode(saturation, forKey: .saturation)
+    }
 
     static let `default` = DisplayConfiguration(
         integerScalingEnabled: true,
-        filterMode: .crt
+        filterMode: .crt,
+        brightness: 1.0,
+        contrast: 1.0,
+        sharpness: 1.0,
+        saturation: 1.0
     )
 }
 
@@ -72,4 +125,8 @@ struct DisplayUniforms {
     var curvature: Float = 0
     var vignetteStrength: Float = 0
     var sharpness: Float = 0
+    var brightness: Float = 1
+    var contrast: Float = 1
+    var saturation: Float = 1
+    var userSharpness: Float = 1
 }

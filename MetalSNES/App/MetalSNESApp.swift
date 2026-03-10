@@ -17,7 +17,7 @@ struct MetalSNESApp: App {
                 ContentView()
             }
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1220, height: 820)
     }
 }

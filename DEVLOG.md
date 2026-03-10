@@ -781,3 +781,88 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
 ### Validation
 - `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
 - 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output
+
+## 2026-03-10: Single-Header Shell + Clean ROM Replacement
+
+### Problem
+- The app had two competing header/tool areas: the custom stylized header plus the native macOS toolbar.
+- Opening a new ROM did not suspend the current emulation session first, which could leave the old core feeding the renderer while the new core booted.
+- Fullscreening the window still left the emulator stage visually boxed in by extra chrome.
+- The user wanted the primary controls consolidated into the stylized header, with secondary tools behind a hamburger menu, and the header to auto-hide while the game is active.
+
+### Changes
+- Removed the native toolbar and bottom control deck, and consolidated the primary actions into a single in-stage header overlay:
+  - visible actions for run/pause, open ROM, save state, load state, and fullscreen
+  - inline `Filter`, `Scale`, and `Latency` controls as pill menus
+  - a hamburger menu for input settings, display settings, debug panel toggle, stepping, tests, benchmark, and diagnostics
+- Reworked the layout so the emulator stage is the main surface and the header sits on top of it instead of consuming separate vertical space.
+- Added header auto-hide behavior driven by pointer movement while emulation is active:
+  - movement or clicks reveal the header
+  - the header hides again after a short timeout when the game is running
+- Switched the window to a hidden-titlebar/full-size-content presentation and tracked fullscreen state from the window so the stage can actually use the available space.
+- Fixed ROM replacement flow:
+  - pause/stop and join the old emulation thread before loading a new cart
+  - save SRAM before tearing the old session down
+  - clear the renderer before the new ROM presents
+  - if the ROM picker is canceled, resume the previous session when it had been running
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output
+
+## 2026-03-10: Heavier Trinitron Neighbor Bleed
+
+### Goal
+- Push the `Trinitron` preset much further toward an emissive Sony-style look where bright RGB cell clusters visibly influence neighboring pixels instead of staying mostly confined to their own texel footprint.
+
+### Changes
+- Retuned the `Trinitron` preset in `MetalRenderer.swift` to run hotter and softer:
+  - higher bloom strength
+  - slightly lower mask strength
+  - slightly softer focus
+- Expanded the hot-phosphor shader path in `Shaders.metal`:
+  - wider bloom sigma in both X and Y
+  - broader sampling support for the `Trinitron` branch than the standard phosphor branch
+  - additional far-lateral and vertical spill so hot cells push light into nearby cells more aggressively
+  - larger rounded-cell glow lobes in the mask itself
+  - stronger post-mask highlight lift and brighter low-level pedestal
+
+### Expected Result
+- White and near-white clusters should now bleed farther into adjacent phosphor bars.
+- Darker content should still keep a soft gray emissive floor instead of dropping to hard black between cells.
+- The grille structure should remain visible, but the overall look should be noticeably more luminous than the prior `Trinitron` pass.
+
+## 2026-03-10: Persisted Image Controls for Display Filters
+
+### Goal
+- Add a proper image-control section with CRT-style tuning knobs instead of hardcoded presets only.
+- Make the controls persistent and apply them to every display mode.
+- Let phosphor-heavy presets react more aggressively to brightness so cranking it up feels like a true emissive bloom control, not just a flat gain stage.
+
+### Changes
+- Expanded `DisplayConfiguration` to persist:
+  - brightness
+  - contrast
+  - sharpness
+  - saturation
+- Added backward-compatible decoding so older saved display settings still load and default the new fields cleanly.
+- Threaded the new values through the final-pass display uniforms and shader path for all filters.
+- Added an `Image` section to the display sheet with sliders for all four controls.
+- Updated shader grading behavior:
+  - all filters now get post-process brightness, contrast, and saturation grading
+  - sharpness now acts as a user multiplier on the filter’s base beam/focus sharpness
+  - `Aperture Bloom` and `Trinitron` use brightness as both output gain and extra glow/bloom drive
+
+### Expected Result
+- `Brightness` now lifts or darkens the whole image, but on the phosphor presets it also makes the glow hotter and spreads it farther.
+- `Contrast` changes the light-dark separation after filtering.
+- `Sharpness` changes beam focus and perceived edge crispness without needing a new preset.
+- `Saturation` ranges from washed-out to heavily boosted phosphor color.
+
+### Follow-up
+- The initial image controls lived in a modal display sheet, which dimmed the emulator and could feel oversized.
+- Moved display controls into a compact in-stage HUD panel instead:
+  - no modal dimming
+  - anchored inside the emulator stage
+  - scrollable, narrower layout
+  - explicit close button
