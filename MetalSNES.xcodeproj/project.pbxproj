@@ -1,0 +1,518 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA000001 /* MetalSNESApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000001 /* MetalSNESApp.swift */; };
+		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000002 /* ContentView.swift */; };
+		AA000003 /* EmulatorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000003 /* EmulatorViewModel.swift */; };
+		AA000004 /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000004 /* MetalRenderer.swift */; };
+		AA000005 /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = AB000005 /* Shaders.metal */; };
+		AA000006 /* EmulatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000006 /* EmulatorView.swift */; };
+		AA000007 /* Types.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000007 /* Types.swift */; };
+		AA000008 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000008 /* Constants.swift */; };
+		AA000009 /* Cartridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000009 /* Cartridge.swift */; };
+		AA000010 /* Bus.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000010 /* Bus.swift */; };
+		AA000011 /* PPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000011 /* PPU.swift */; };
+		AA000012 /* APU.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000012 /* APU.swift */; };
+		AA000013 /* DMA.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000013 /* DMA.swift */; };
+		AA000014 /* Joypad.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000014 /* Joypad.swift */; };
+		AA000015 /* Timing.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000015 /* Timing.swift */; };
+		AA000016 /* CPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000016 /* CPU.swift */; };
+		AA000017 /* CPUInstructions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000017 /* CPUInstructions.swift */; };
+		AA000018 /* cpu_dispatch.c in Sources */ = {isa = PBXBuildFile; fileRef = AB000018 /* cpu_dispatch.c */; };
+		AA000019 /* EmulatorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000019 /* EmulatorCore.swift */; };
+		AA000020 /* DebugState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000020 /* DebugState.swift */; };
+		AA000021 /* RegisterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000021 /* RegisterView.swift */; };
+		AA000022 /* MemoryViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000022 /* MemoryViewer.swift */; };
+		AA000023 /* DisassemblerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000023 /* DisassemblerView.swift */; };
+		AA000024 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AB000024 /* Assets.xcassets */; };
+		AA000025 /* CPUTestRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000030 /* CPUTestRunner.swift */; };
+		AA000026 /* PPUDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000031 /* PPUDiagnostic.swift */; };
+		AA000027 /* SpriteDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000032 /* SpriteDebugView.swift */; };
+		AA000028 /* VRAMTileViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000033 /* VRAMTileViewer.swift */; };
+		AA000029 /* PPURegisterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000034 /* PPURegisterView.swift */; };
+		AA000030 /* SPC700.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000035 /* SPC700.swift */; };
+		AA000031 /* DSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000036 /* DSP.swift */; };
+		AA000032 /* AudioOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000037 /* AudioOutput.swift */; };
+		AA000033 /* SaveState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000038 /* SaveState.swift */; };
+		AA000034 /* DebugServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000039 /* DebugServer.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AB000001 /* MetalSNESApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalSNESApp.swift; sourceTree = "<group>"; };
+		AB000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AB000003 /* EmulatorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorViewModel.swift; sourceTree = "<group>"; };
+		AB000004 /* MetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRenderer.swift; sourceTree = "<group>"; };
+		AB000005 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
+		AB000006 /* EmulatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorView.swift; sourceTree = "<group>"; };
+		AB000007 /* Types.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Types.swift; sourceTree = "<group>"; };
+		AB000008 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		AB000009 /* Cartridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cartridge.swift; sourceTree = "<group>"; };
+		AB000010 /* Bus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bus.swift; sourceTree = "<group>"; };
+		AB000011 /* PPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PPU.swift; sourceTree = "<group>"; };
+		AB000012 /* APU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APU.swift; sourceTree = "<group>"; };
+		AB000013 /* DMA.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DMA.swift; sourceTree = "<group>"; };
+		AB000014 /* Joypad.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Joypad.swift; sourceTree = "<group>"; };
+		AB000015 /* Timing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Timing.swift; sourceTree = "<group>"; };
+		AB000016 /* CPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CPU.swift; sourceTree = "<group>"; };
+		AB000017 /* CPUInstructions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CPUInstructions.swift; sourceTree = "<group>"; };
+		AB000018 /* cpu_dispatch.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = cpu_dispatch.c; sourceTree = "<group>"; };
+		AB000019 /* EmulatorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorCore.swift; sourceTree = "<group>"; };
+		AB000020 /* DebugState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugState.swift; sourceTree = "<group>"; };
+		AB000021 /* RegisterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegisterView.swift; sourceTree = "<group>"; };
+		AB000022 /* MemoryViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryViewer.swift; sourceTree = "<group>"; };
+		AB000023 /* DisassemblerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisassemblerView.swift; sourceTree = "<group>"; };
+		AB000024 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AB000025 /* cpu_dispatch.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = cpu_dispatch.h; sourceTree = "<group>"; };
+		AB000026 /* MetalSNES-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "MetalSNES-Bridging-Header.h"; sourceTree = "<group>"; };
+		AB000027 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AB000028 /* MetalSNES.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MetalSNES.entitlements; sourceTree = "<group>"; };
+		AB000030 /* CPUTestRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CPUTestRunner.swift; sourceTree = "<group>"; };
+		AB000031 /* PPUDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PPUDiagnostic.swift; sourceTree = "<group>"; };
+		AB000032 /* SpriteDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteDebugView.swift; sourceTree = "<group>"; };
+		AB000033 /* VRAMTileViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VRAMTileViewer.swift; sourceTree = "<group>"; };
+		AB000034 /* PPURegisterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PPURegisterView.swift; sourceTree = "<group>"; };
+		AB000035 /* SPC700.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPC700.swift; sourceTree = "<group>"; };
+		AB000036 /* DSP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DSP.swift; sourceTree = "<group>"; };
+		AB000037 /* AudioOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOutput.swift; sourceTree = "<group>"; };
+		AB000038 /* SaveState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveState.swift; sourceTree = "<group>"; };
+		AB000039 /* DebugServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugServer.swift; sourceTree = "<group>"; };
+		AB000099 /* MetalSNES.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalSNES.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AC000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AD000001 = {
+			isa = PBXGroup;
+			children = (
+				AD000002 /* MetalSNES */,
+				AD000099 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AD000002 /* MetalSNES */ = {
+			isa = PBXGroup;
+			children = (
+				AD000003 /* App */,
+				AD000004 /* Renderer */,
+				AD000005 /* Emulator */,
+				AD000006 /* CPU */,
+				AD000007 /* CCore */,
+				AD000008 /* Support */,
+				AD000009 /* Debug */,
+				AD000011 /* Tests */,
+				AD000010 /* Resources */,
+				AB000026 /* MetalSNES-Bridging-Header.h */,
+			);
+			path = MetalSNES;
+			sourceTree = "<group>";
+		};
+		AD000003 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				AB000001 /* MetalSNESApp.swift */,
+				AB000002 /* ContentView.swift */,
+				AB000003 /* EmulatorViewModel.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		AD000004 /* Renderer */ = {
+			isa = PBXGroup;
+			children = (
+				AB000004 /* MetalRenderer.swift */,
+				AB000005 /* Shaders.metal */,
+				AB000006 /* EmulatorView.swift */,
+			);
+			path = Renderer;
+			sourceTree = "<group>";
+		};
+		AD000005 /* Emulator */ = {
+			isa = PBXGroup;
+			children = (
+				AB000019 /* EmulatorCore.swift */,
+				AB000010 /* Bus.swift */,
+				AB000009 /* Cartridge.swift */,
+				AB000011 /* PPU.swift */,
+				AB000012 /* APU.swift */,
+				AB000013 /* DMA.swift */,
+				AB000014 /* Joypad.swift */,
+				AB000015 /* Timing.swift */,
+				AB000035 /* SPC700.swift */,
+				AB000036 /* DSP.swift */,
+				AB000037 /* AudioOutput.swift */,
+				AB000038 /* SaveState.swift */,
+				AB000039 /* DebugServer.swift */,
+			);
+			path = Emulator;
+			sourceTree = "<group>";
+		};
+		AD000006 /* CPU */ = {
+			isa = PBXGroup;
+			children = (
+				AB000016 /* CPU.swift */,
+				AB000017 /* CPUInstructions.swift */,
+			);
+			path = CPU;
+			sourceTree = "<group>";
+		};
+		AD000007 /* CCore */ = {
+			isa = PBXGroup;
+			children = (
+				AB000025 /* cpu_dispatch.h */,
+				AB000018 /* cpu_dispatch.c */,
+			);
+			path = CCore;
+			sourceTree = "<group>";
+		};
+		AD000008 /* Support */ = {
+			isa = PBXGroup;
+			children = (
+				AB000007 /* Types.swift */,
+				AB000008 /* Constants.swift */,
+			);
+			path = Support;
+			sourceTree = "<group>";
+		};
+		AD000009 /* Debug */ = {
+			isa = PBXGroup;
+			children = (
+				AB000020 /* DebugState.swift */,
+				AB000021 /* RegisterView.swift */,
+				AB000022 /* MemoryViewer.swift */,
+				AB000032 /* SpriteDebugView.swift */,
+				AB000033 /* VRAMTileViewer.swift */,
+				AB000034 /* PPURegisterView.swift */,
+				AB000023 /* DisassemblerView.swift */,
+			);
+			path = Debug;
+			sourceTree = "<group>";
+		};
+		AD000010 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				AB000027 /* Info.plist */,
+				AB000028 /* MetalSNES.entitlements */,
+				AB000024 /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		AD000011 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				AB000030 /* CPUTestRunner.swift */,
+				AB000031 /* PPUDiagnostic.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		AD000099 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AB000099 /* MetalSNES.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AE000001 /* MetalSNES */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AF000003 /* Build configuration list for PBXNativeTarget "MetalSNES" */;
+			buildPhases = (
+				AE000002 /* Sources */,
+				AC000001 /* Frameworks */,
+				AE000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MetalSNES;
+			productName = MetalSNES;
+			productReference = AB000099 /* MetalSNES.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AE000099 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1630;
+				TargetAttributes = {
+					AE000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = AF000001 /* Build configuration list for PBXProject "MetalSNES" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = AD000001;
+			productRefGroup = AD000099 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AE000001 /* MetalSNES */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AE000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000024 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AE000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001 /* MetalSNESApp.swift in Sources */,
+				AA000002 /* ContentView.swift in Sources */,
+				AA000003 /* EmulatorViewModel.swift in Sources */,
+				AA000004 /* MetalRenderer.swift in Sources */,
+				AA000005 /* Shaders.metal in Sources */,
+				AA000006 /* EmulatorView.swift in Sources */,
+				AA000007 /* Types.swift in Sources */,
+				AA000008 /* Constants.swift in Sources */,
+				AA000009 /* Cartridge.swift in Sources */,
+				AA000010 /* Bus.swift in Sources */,
+				AA000011 /* PPU.swift in Sources */,
+				AA000012 /* APU.swift in Sources */,
+				AA000013 /* DMA.swift in Sources */,
+				AA000014 /* Joypad.swift in Sources */,
+				AA000015 /* Timing.swift in Sources */,
+				AA000016 /* CPU.swift in Sources */,
+				AA000017 /* CPUInstructions.swift in Sources */,
+				AA000018 /* cpu_dispatch.c in Sources */,
+				AA000019 /* EmulatorCore.swift in Sources */,
+				AA000020 /* DebugState.swift in Sources */,
+				AA000021 /* RegisterView.swift in Sources */,
+				AA000022 /* MemoryViewer.swift in Sources */,
+				AA000027 /* SpriteDebugView.swift in Sources */,
+				AA000028 /* VRAMTileViewer.swift in Sources */,
+				AA000029 /* PPURegisterView.swift in Sources */,
+				AA000023 /* DisassemblerView.swift in Sources */,
+				AA000025 /* CPUTestRunner.swift in Sources */,
+				AA000026 /* PPUDiagnostic.swift in Sources */,
+				AA000030 /* SPC700.swift in Sources */,
+				AA000031 /* DSP.swift in Sources */,
+				AA000032 /* AudioOutput.swift in Sources */,
+				AA000033 /* SaveState.swift in Sources */,
+				AA000034 /* DebugServer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AF000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AF000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = fast;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		AF000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MetalSNES/Resources/MetalSNES.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MetalSNES/Resources/Info.plist;
+				INFOPLIST_KEY_NSMainNibFile = "";
+				INFOPLIST_KEY_NSPrincipalClass = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.metalSNES.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "MetalSNES/MetalSNES-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AF000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MetalSNES/Resources/MetalSNES.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MetalSNES/Resources/Info.plist;
+				INFOPLIST_KEY_NSMainNibFile = "";
+				INFOPLIST_KEY_NSPrincipalClass = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.metalSNES.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "MetalSNES/MetalSNES-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AF000001 /* Build configuration list for PBXProject "MetalSNES" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF000011 /* Debug */,
+				AF000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AF000003 /* Build configuration list for PBXNativeTarget "MetalSNES" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF000021 /* Debug */,
+				AF000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AE000099 /* Project object */;
+}

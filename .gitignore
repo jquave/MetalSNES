@@ -1,0 +1,9 @@
+bsnes
+CLAUDE.md
+.claude
+*.sfc
+*.srm
+*.state
+run_tests_dbg.dSYM
+build_bench
+build

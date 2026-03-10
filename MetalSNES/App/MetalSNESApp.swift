@@ -1,0 +1,46 @@
+import SwiftUI
+
+@main
+struct MetalSNESApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+        .windowStyle(.titleBar)
+        .defaultSize(width: 800, height: 600)
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Bring window to front when launched from CLI/Xcode
+        NSApp.activate(ignoringOtherApps: true)
+        // Ensure the first window becomes key so emulation can start
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+
+        // CLI benchmark mode: --benchmark [rom_path]
+        let args = ProcessInfo.processInfo.arguments
+        if let idx = args.firstIndex(of: "--benchmark") {
+            let romPath: String
+            if idx + 1 < args.count {
+                romPath = args[idx + 1]
+            } else {
+                romPath = NSHomeDirectory() + "/src/MetalSNES/mario.sfc"
+            }
+            DispatchQueue.global(qos: .userInteractive).async {
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: romPath)) else {
+                    print("BENCHMARK ERROR: Cannot read ROM at \(romPath)")
+                    exit(1)
+                }
+                let cart = try! Cartridge(data: data)
+                let core = EmulatorCore(cartridge: cart)
+                core.benchmark(frames: 120)
+                exit(0)
+            }
+        }
+    }
+}
