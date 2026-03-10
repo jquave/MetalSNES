@@ -1,6 +1,11 @@
 import Foundation
 
 final class APU {
+    struct Snapshot {
+        var dspSampleAccumulator: Double = 0
+        var dspCycleAccumulator: Double = 0
+    }
+
     let spc700: SPC700
     let dsp: DSP
     let audioOutput: AudioOutput
@@ -58,7 +63,7 @@ final class APU {
         let p = Int(port & 0x03)
         let old = spc700.portsFromCPU[p]
         spc700.portsFromCPU[p] = value
-        if dsp.diagSampleCount < 5000000 {
+        if EmulatorCore.debugLogging && dsp.diagSampleCount < 5000000 {
             if value != old || p == 0 || p == 2 {
                 dsp.diagLog(String(format: "[CPU→SPC] port%d = $%02X (was $%02X) at sample %llu", p, value, old, dsp.diagSampleCount))
             }
@@ -72,14 +77,16 @@ final class APU {
 
     /// Fine-grained DSP sample generation interleaved with SPC execution.
     /// Call after each SPC step with the number of SPC cycles consumed.
-    func runSPCCycles(_ cycles: Int) {
+    func runSPCCycles(_ cycles: Int, outputAudio: Bool = true) {
         // Don't output audio while boot ROM is active (BRR data is garbage)
         guard !spc700.bootRomEnabled else { return }
 
         dspCycleAccumulator += Double(cycles)
         while dspCycleAccumulator >= APU.spcCyclesPerDSPSample {
             let (l, r) = dsp.generateSample()
-            audioOutput.writeSample(left: l, right: r)
+            if outputAudio {
+                audioOutput.writeSample(left: l, right: r)
+            }
             dspCycleAccumulator -= APU.spcCyclesPerDSPSample
         }
     }
@@ -92,6 +99,8 @@ final class APU {
     /// Call once per scanline for debug logging and scanline accounting.
     func tickScanline() {
         totalScanlines += 1
+
+        guard EmulatorCore.debugLogging else { return }
 
         // Sample SPC PC every scanline for histogram
         let pc = spc700.pc
@@ -164,53 +173,53 @@ final class APU {
     }
 
     private func logDebug() {
-        if EmulatorCore.debugLogging || totalScanlines <= 262 * 300 {
-            if totalScanlines % 262 == 0 {
-                let frame = totalScanlines / 262
-                let pc = spc700.pc
-                let p0out = spc700.portsToCPU[0]
-                let p1out = spc700.portsToCPU[1]
-                let p0in = spc700.portsFromCPU[0]
-                let p1in = spc700.portsFromCPU[1]
-                let bootRom = spc700.bootRomEnabled
-                print(String(format: "[APU] F%d PC=$%04X A=$%02X ports out=%02X/%02X in=%02X/%02X boot=%@",
-                             frame, pc, spc700.a, p0out, p1out, p0in, p1in,
-                             bootRom ? "Y" : "N"))
+        guard EmulatorCore.debugLogging else { return }
+
+        if totalScanlines % 262 == 0 {
+            let frame = totalScanlines / 262
+            let pc = spc700.pc
+            let p0out = spc700.portsToCPU[0]
+            let p1out = spc700.portsToCPU[1]
+            let p0in = spc700.portsFromCPU[0]
+            let p1in = spc700.portsFromCPU[1]
+            let bootRom = spc700.bootRomEnabled
+            print(String(format: "[APU] F%d PC=$%04X A=$%02X ports out=%02X/%02X in=%02X/%02X boot=%@",
+                         frame, pc, spc700.a, p0out, p1out, p0in, p1in,
+                         bootRom ? "Y" : "N"))
+            fflush(stdout)
+            if !bootHandshakeComplete && !bootRom {
+                bootHandshakeComplete = true
+                print("[APU] Boot ROM disabled — handshake likely complete, executing game audio code")
                 fflush(stdout)
-                if !bootHandshakeComplete && !bootRom {
-                    bootHandshakeComplete = true
-                    print("[APU] Boot ROM disabled — handshake likely complete, executing game audio code")
-                    fflush(stdout)
-                }
-                // Timer diagnostic (every 60 frames)
-                if frame % 60 == 0 {
-                    let t0en = spc700.timerEnabled[0]
-                    let t1en = spc700.timerEnabled[1]
-                    let t2en = spc700.timerEnabled[2]
-                    let t0div = spc700.timerDivisor[0]
-                    let t1div = spc700.timerDivisor[1]
-                    let t2div = spc700.timerDivisor[2]
-                    let ctrl = spc700.ram[0xF1]
-                    print(String(format: "[APU] F%d Timers: T0=%@(div=%d) T1=%@(div=%d) T2=%@(div=%d) CTRL=$%02X ports=%02X/%02X/%02X/%02X",
-                                 frame, t0en ? "ON" : "off", t0div, t1en ? "ON" : "off", t1div, t2en ? "ON" : "off", t2div, ctrl,
-                                 p0in, p1in, spc700.portsFromCPU[2], spc700.portsFromCPU[3]))
-                    fflush(stdout)
-                }
-                // Log DSP voice activity (read-only — do NOT call generateSample!)
-                let kon = dsp.regs[0x4C]
-                let activeVoices = (0..<8).filter { dsp.voices[$0].keyedOn }.count
-                let buffered = audioOutput.bufferedSamples
-                if activeVoices > 0 || kon != 0 {
-                    // Find first active voice for diagnostics
-                    let av = (0..<8).first { dsp.voices[$0].keyedOn } ?? 0
-                    let voff = av * 0x10
-                    let vEnv = dsp.voices[av].envLevel
-                    let vPitch = UInt16(dsp.regs[voff + 2]) | (UInt16(dsp.regs[voff + 3] & 0x3F) << 8)
-                    let vMode = dsp.voices[av].envMode
-                    print(String(format: "[APU] F%d DSP: KON=$%02X active=%d v%d env=%d pitch=$%04X mode=%@ buf=%d",
-                                 frame, kon, activeVoices, av, vEnv, vPitch, "\(vMode)", buffered))
-                    fflush(stdout)
-                }
+            }
+            // Timer diagnostic (every 60 frames)
+            if frame % 60 == 0 {
+                let t0en = spc700.timerEnabled[0]
+                let t1en = spc700.timerEnabled[1]
+                let t2en = spc700.timerEnabled[2]
+                let t0div = spc700.timerDivisor[0]
+                let t1div = spc700.timerDivisor[1]
+                let t2div = spc700.timerDivisor[2]
+                let ctrl = spc700.ram[0xF1]
+                print(String(format: "[APU] F%d Timers: T0=%@(div=%d) T1=%@(div=%d) T2=%@(div=%d) CTRL=$%02X ports=%02X/%02X/%02X/%02X",
+                             frame, t0en ? "ON" : "off", t0div, t1en ? "ON" : "off", t1div, t2en ? "ON" : "off", t2div, ctrl,
+                             p0in, p1in, spc700.portsFromCPU[2], spc700.portsFromCPU[3]))
+                fflush(stdout)
+            }
+            // Log DSP voice activity (read-only — do NOT call generateSample!)
+            let kon = dsp.regs[0x4C]
+            let activeVoices = (0..<8).filter { dsp.voices[$0].keyedOn }.count
+            let buffered = audioOutput.bufferedSamples
+            if activeVoices > 0 || kon != 0 {
+                // Find first active voice for diagnostics
+                let av = (0..<8).first { dsp.voices[$0].keyedOn } ?? 0
+                let voff = av * 0x10
+                let vEnv = dsp.voices[av].envLevel
+                let vPitch = UInt16(dsp.regs[voff + 2]) | (UInt16(dsp.regs[voff + 3] & 0x3F) << 8)
+                let vMode = dsp.voices[av].envMode
+                print(String(format: "[APU] F%d DSP: KON=$%02X active=%d v%d env=%d pitch=$%04X mode=%@ buf=%d",
+                             frame, kon, activeVoices, av, vEnv, vPitch, "\(vMode)", buffered))
+                fflush(stdout)
             }
         }
     }
@@ -221,5 +230,17 @@ final class APU {
 
     func stopAudio() {
         audioOutput.stop()
+    }
+
+    func captureSnapshot() -> Snapshot {
+        Snapshot(
+            dspSampleAccumulator: dspSampleAccumulator,
+            dspCycleAccumulator: dspCycleAccumulator
+        )
+    }
+
+    func restoreSnapshot(_ snapshot: Snapshot) {
+        dspSampleAccumulator = snapshot.dspSampleAccumulator
+        dspCycleAccumulator = snapshot.dspCycleAccumulator
     }
 }

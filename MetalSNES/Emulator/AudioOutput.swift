@@ -149,6 +149,10 @@ final class AudioOutput {
         return result
     }
 
+    var pacingTargetBufferedSamples: Int {
+        prebufferSamples + (prebufferSamples / 2)
+    }
+
     var overrunEvents: UInt64 {
         os_unfair_lock_lock(&lock)
         let result = overrunCount

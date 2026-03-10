@@ -49,9 +49,9 @@ struct EmulatorView: NSViewRepresentable {
         mtkView.device = MTLCreateSystemDefaultDevice()
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.framebufferOnly = true
-        mtkView.preferredFramesPerSecond = 60
+        mtkView.preferredFramesPerSecond = NSScreen.main?.maximumFramesPerSecond ?? 60
         mtkView.enableSetNeedsDisplay = false
-        mtkView.isPaused = false
+        mtkView.isPaused = !viewModel.isRunning
 
         if let renderer = MetalRenderer(mtkView: mtkView) {
             mtkView.delegate = renderer
@@ -68,6 +68,8 @@ struct EmulatorView: NSViewRepresentable {
         if let mtkView = nsView as? KeyCaptureMTKView {
             mtkView.inputManager = viewModel.inputManager
             viewModel.inputManager.attach(joypad: viewModel.emulatorCore?.bus.joypad)
+            mtkView.preferredFramesPerSecond = nsView.window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
+            mtkView.isPaused = !viewModel.isRunning
             if nsView.window?.firstResponder !== nsView {
                 nsView.window?.makeFirstResponder(nsView)
             }

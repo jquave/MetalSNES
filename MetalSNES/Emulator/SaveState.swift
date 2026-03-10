@@ -4,7 +4,7 @@ import Foundation
 /// Format: "MSNS" magic + version u32 + sequential component data.
 final class SaveState {
     static let magic: UInt32 = 0x534E534D  // "MSNS"
-    static let version: UInt32 = 3
+    static let version: UInt32 = 4
 
     // MARK: - Writer
 
@@ -13,7 +13,9 @@ final class SaveState {
     private func write8(_ v: UInt8) { data.append(v) }
     private func write16(_ v: UInt16) { var v = v; data.append(Data(bytes: &v, count: 2)) }
     private func write32(_ v: UInt32) { var v = v; data.append(Data(bytes: &v, count: 4)) }
+    private func write64(_ v: UInt64) { var v = v; data.append(Data(bytes: &v, count: 8)) }
     private func writeS32(_ v: Int32) { write32(UInt32(bitPattern: v)) }
+    private func writeDouble(_ v: Double) { write64(v.bitPattern) }
     private func writeBool(_ v: Bool) { data.append(v ? 1 : 0) }
     private func writeData(_ d: [UInt8]) {
         write32(UInt32(d.count))
@@ -49,7 +51,12 @@ final class SaveState {
         let v = readData.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: readOffset, as: UInt32.self) }
         readOffset += 4; return v
     }
+    private func read64() -> UInt64 {
+        let v = readData.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: readOffset, as: UInt64.self) }
+        readOffset += 8; return v
+    }
     private func readS32() -> Int32 { Int32(bitPattern: read32()) }
+    private func readDouble() -> Double { Double(bitPattern: read64()) }
     private func readBool() -> Bool { read8() != 0 }
     private func readDataChunk() -> [UInt8] {
         let count = Int(read32())
@@ -75,7 +82,8 @@ final class SaveState {
     // MARK: - Save
 
     func save(core: EmulatorCore) -> Data {
-        data = Data()
+        data.removeAll(keepingCapacity: true)
+        data.reserveCapacity(450_000)
         write32(SaveState.magic)
         write32(SaveState.version)
 
@@ -85,6 +93,8 @@ final class SaveState {
         saveSPC(core.bus.apu.spc700)
         saveDSP(core.bus.apu.dsp)
         saveDMA(core.bus.dma)
+        saveAPU(core.bus.apu)
+        saveJoypad(core.bus.joypad)
 
         return data
     }
@@ -145,6 +155,15 @@ final class SaveState {
         write8(ppu.wh0); write8(ppu.wh1); write8(ppu.wh2); write8(ppu.wh3)
         write8(ppu.wbglog); write8(ppu.wobjlog)
         write8(ppu.tmw); write8(ppu.tsw)
+
+        let snapshot = ppu.captureSnapshot()
+        write8(snapshot.scrollLatch)
+        write16(snapshot.vramPrefetch)
+        write8(snapshot.fixedColorR); write8(snapshot.fixedColorG); write8(snapshot.fixedColorB)
+        write16(snapshot.oamAddr); write8(snapshot.oamLatch)
+        write16(snapshot.cgramAddr); write8(snapshot.cgramLatch); writeBool(snapshot.cgramFlipFlop)
+        write8(snapshot.m7Latch)
+        writeS32(snapshot.mpyResult)
     }
 
     private func saveSPC(_ spc: SPC700) {
@@ -192,6 +211,21 @@ final class SaveState {
             write32(0) // envCounter removed (now using global counter)
             writeS16Array(v.prev)
         }
+
+        let snapshot = dsp.captureSnapshot()
+        write32(UInt32(snapshot.globalCounter))
+        write16(UInt16(bitPattern: snapshot.noiseLevel))
+        write32(UInt32(snapshot.echoPos))
+        writeS16Array(snapshot.echoHistL)
+        writeS16Array(snapshot.echoHistR)
+        write32(UInt32(snapshot.echoHistPos))
+        write8(snapshot.konLatch)
+        write8(snapshot.koffLatch)
+        for voice in snapshot.voices {
+            writeS32(Int32(voice.hiddenEnv))
+            write32(UInt32(voice.konDelay))
+            writeS32(Int32(voice.output))
+        }
     }
 
     private func saveDMA(_ dma: DMA) {
@@ -210,6 +244,21 @@ final class SaveState {
         }
     }
 
+    private func saveAPU(_ apu: APU) {
+        let snapshot = apu.captureSnapshot()
+        writeDouble(snapshot.dspSampleAccumulator)
+        writeDouble(snapshot.dspCycleAccumulator)
+    }
+
+    private func saveJoypad(_ joypad: Joypad) {
+        let snapshot = joypad.captureSnapshot()
+        write16(snapshot.joy1Auto)
+        write16(snapshot.joy2Auto)
+        writeBool(snapshot.strobeOn)
+        write16(snapshot.joy1Shift)
+        write32(UInt32(snapshot.joy1ReadCount))
+    }
+
     // MARK: - Restore
 
     func restore(from fileData: Data, core: EmulatorCore) throws {
@@ -221,7 +270,7 @@ final class SaveState {
             throw SaveStateError.invalidMagic
         }
         let ver = read32()
-        guard ver == 2 || ver == SaveState.version else {
+        guard ver >= 2 && ver <= SaveState.version else {
             throw SaveStateError.versionMismatch
         }
         loadedVersion = ver
@@ -232,6 +281,13 @@ final class SaveState {
         restoreSPC(core.bus.apu.spc700)
         restoreDSP(core.bus.apu.dsp)
         restoreDMA(core.bus.dma)
+        if loadedVersion >= 4 {
+            restoreAPU(core.bus.apu)
+            restoreJoypad(core.bus.joypad)
+        } else {
+            core.bus.apu.restoreSnapshot(.init())
+            core.bus.joypad.restoreSnapshot(.init())
+        }
     }
 
     private func restoreCPU(_ cpu: CPU) {
@@ -285,6 +341,25 @@ final class SaveState {
         ppu.wh0 = read8(); ppu.wh1 = read8(); ppu.wh2 = read8(); ppu.wh3 = read8()
         ppu.wbglog = read8(); ppu.wobjlog = read8()
         ppu.tmw = read8(); ppu.tsw = read8()
+
+        if loadedVersion >= 4 {
+            ppu.restoreSnapshot(.init(
+                scrollLatch: read8(),
+                vramPrefetch: read16(),
+                fixedColorR: read8(),
+                fixedColorG: read8(),
+                fixedColorB: read8(),
+                oamAddr: read16(),
+                oamLatch: read8(),
+                cgramAddr: read16(),
+                cgramLatch: read8(),
+                cgramFlipFlop: readBool(),
+                m7Latch: read8(),
+                mpyResult: readS32()
+            ))
+        } else {
+            ppu.restoreSnapshot(.init())
+        }
     }
 
     private func restoreSPC(_ spc: SPC700) {
@@ -341,6 +416,28 @@ final class SaveState {
             _ = read32() // envCounter removed (now using global counter)
             dsp.voices[i].prev = readS16Array()
         }
+
+        if loadedVersion >= 4 {
+            var snapshot = DSP.Snapshot()
+            snapshot.globalCounter = Int(read32())
+            snapshot.noiseLevel = Int16(bitPattern: read16())
+            snapshot.echoPos = Int(read32())
+            snapshot.echoHistL = readS16Array()
+            snapshot.echoHistR = readS16Array()
+            snapshot.echoHistPos = Int(read32())
+            snapshot.konLatch = read8()
+            snapshot.koffLatch = read8()
+            snapshot.voices = (0..<8).map { _ in
+                DSP.VoiceSnapshot(
+                    hiddenEnv: Int(readS32()),
+                    konDelay: Int(read32()),
+                    output: Int(readS32())
+                )
+            }
+            dsp.restoreSnapshot(snapshot)
+        } else {
+            dsp.restoreSnapshot(.init())
+        }
     }
 
     private func restoreDMA(_ dma: DMA) {
@@ -358,6 +455,23 @@ final class SaveState {
             dma.hdmaTableAddr[i] = read32()
             dma.hdmaIndirect[i] = readBool()
         }
+    }
+
+    private func restoreAPU(_ apu: APU) {
+        apu.restoreSnapshot(.init(
+            dspSampleAccumulator: readDouble(),
+            dspCycleAccumulator: readDouble()
+        ))
+    }
+
+    private func restoreJoypad(_ joypad: Joypad) {
+        joypad.restoreSnapshot(.init(
+            joy1Auto: read16(),
+            joy2Auto: read16(),
+            strobeOn: readBool(),
+            joy1Shift: read16(),
+            joy1ReadCount: Int(read32())
+        ))
     }
 
     enum SaveStateError: Error, LocalizedError {

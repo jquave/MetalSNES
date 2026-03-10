@@ -7,6 +7,14 @@ enum JoypadInputSource {
 }
 
 final class Joypad {
+    struct Snapshot {
+        var joy1Auto: UInt16 = 0
+        var joy2Auto: UInt16 = 0
+        var strobeOn = false
+        var joy1Shift: UInt16 = 0
+        var joy1ReadCount = 0
+    }
+
     // SNES joypad bits:
     // High byte: B Y Select Start Up Down Left Right
     // Low byte:  A X L R 0 0 0 0
@@ -68,5 +76,23 @@ final class Joypad {
     func autoRead() {
         joy1Auto = joy1State
         joy2Auto = joy2State
+    }
+
+    func captureSnapshot() -> Snapshot {
+        Snapshot(
+            joy1Auto: joy1Auto,
+            joy2Auto: joy2Auto,
+            strobeOn: strobeOn,
+            joy1Shift: joy1Shift,
+            joy1ReadCount: joy1ReadCount
+        )
+    }
+
+    func restoreSnapshot(_ snapshot: Snapshot) {
+        joy1Auto = snapshot.joy1Auto
+        joy2Auto = snapshot.joy2Auto
+        strobeOn = snapshot.strobeOn
+        joy1Shift = snapshot.joy1Shift
+        joy1ReadCount = snapshot.joy1ReadCount
     }
 }

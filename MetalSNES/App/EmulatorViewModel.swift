@@ -2,18 +2,44 @@ import SwiftUI
 import Combine
 
 final class EmulatorViewModel: ObservableObject {
+    private static let runAheadFramesKey = "MetalSNES.runAheadFrames"
+    private static let defaultRunAheadFrames = 1
+
     @Published var isRunning = false
     @Published var statusText = "Ready"
     @Published var debugState = DebugState()
+    @Published var runAheadFrames: Int {
+        didSet {
+            let clamped = Self.clampRunAheadFrames(runAheadFrames)
+            guard clamped == runAheadFrames else {
+                runAheadFrames = clamped
+                return
+            }
+            userDefaults.set(clamped, forKey: Self.runAheadFramesKey)
+            emulatorCore?.runAheadFrames = clamped
+        }
+    }
 
     lazy var inputManager = InputManager()
 
     var renderer: MetalRenderer?
     var emulatorCore: EmulatorCore?
     private(set) var romURL: URL?
+    private var debugUIEnabled = false
+    private let userDefaults: UserDefaults
 
     private var emulationThread: Thread?
     private var terminationObserver: Any?
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        let initialRunAheadFrames = Self.initialRunAheadFrames(from: userDefaults)
+        self.runAheadFrames = initialRunAheadFrames
+        if Self.commandLineRunAheadFrames() == nil,
+           userDefaults.object(forKey: Self.runAheadFramesKey) == nil {
+            userDefaults.set(initialRunAheadFrames, forKey: Self.runAheadFramesKey)
+        }
+    }
 
     deinit {
         if let observer = terminationObserver {
@@ -37,6 +63,8 @@ final class EmulatorViewModel: ObservableObject {
             self.emulatorCore = core
             core.renderer = renderer
             core.debugState = debugState
+            core.debugSnapshotsEnabled = debugUIEnabled
+            core.runAheadFrames = runAheadFrames
             inputManager.attach(joypad: core.bus.joypad)
 
             // Load SRAM if a .srm file exists next to the ROM
@@ -76,7 +104,6 @@ final class EmulatorViewModel: ObservableObject {
             statusText = "Paused"
             saveSRAM()
         } else {
-            core.startDebugServer()
             core.isRunning = true
             isRunning = true
             statusText = "Running"
@@ -102,6 +129,14 @@ final class EmulatorViewModel: ObservableObject {
     func updateDebugState() {
         guard let core = emulatorCore else { return }
         core.updateDebugState()
+    }
+
+    func setDebugUIEnabled(_ enabled: Bool) {
+        debugUIEnabled = enabled
+        emulatorCore?.debugSnapshotsEnabled = enabled
+        if enabled {
+            updateDebugState()
+        }
     }
 
     func runBenchmark() {
@@ -211,5 +246,30 @@ final class EmulatorViewModel: ObservableObject {
             emulationThread?.qualityOfService = .userInteractive
             emulationThread?.start()
         }
+    }
+
+    private static func clampRunAheadFrames(_ value: Int) -> Int {
+        min(max(value, 0), 1)
+    }
+
+    private static func initialRunAheadFrames(from userDefaults: UserDefaults) -> Int {
+        if let override = commandLineRunAheadFrames() {
+            return override
+        }
+        guard let storedValue = userDefaults.object(forKey: runAheadFramesKey) as? Int else {
+            return defaultRunAheadFrames
+        }
+        return clampRunAheadFrames(storedValue)
+    }
+
+    private static func commandLineRunAheadFrames() -> Int? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let index = args.firstIndex(of: "--run-ahead"), index + 1 < args.count else {
+            return nil
+        }
+        guard let value = Int(args[index + 1]) else {
+            return nil
+        }
+        return clampRunAheadFrames(value)
     }
 }

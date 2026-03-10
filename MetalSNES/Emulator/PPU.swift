@@ -1,6 +1,37 @@
 import Foundation
 
 final class PPU {
+    struct Snapshot {
+        var scrollLatch: UInt8 = 0
+        var vramPrefetch: UInt16 = 0
+        var fixedColorR: UInt8 = 0
+        var fixedColorG: UInt8 = 0
+        var fixedColorB: UInt8 = 0
+        var oamAddr: UInt16 = 0
+        var oamLatch: UInt8 = 0
+        var cgramAddr: UInt16 = 0
+        var cgramLatch: UInt8 = 0
+        var cgramFlipFlop = false
+        var m7Latch: UInt8 = 0
+        var mpyResult: Int32 = 0
+    }
+
+    private static let bitplanePairPixelTable: [UInt64] = {
+        var table = [UInt64](repeating: 0, count: 1 << 16)
+        for pair in 0..<(1 << 16) {
+            let bp0 = UInt8(pair & 0xFF)
+            let bp1 = UInt8(pair >> 8)
+            var pixels: UInt64 = 0
+            for fineX in 0..<8 {
+                let bit = 7 - fineX
+                let pixel = UInt64(((bp0 >> bit) & 1) | (((bp1 >> bit) & 1) << 1))
+                pixels |= pixel << (fineX << 3)
+            }
+            table[pair] = pixels
+        }
+        return table
+    }()
+
     // VRAM - 64KB (32K words)
     var vram = [UInt8](repeating: 0, count: SNESConstants.vramSize)
     // OAM - 544 bytes
@@ -9,9 +40,12 @@ final class PPU {
     var cgram = [UInt8](repeating: 0, count: SNESConstants.cgramSize)
 
     // Framebuffer (double-buffered)
+    private let fbPixelCount = SNESConstants.screenWidth * SNESConstants.screenHeight
     private let fbSize = SNESConstants.screenWidth * SNESConstants.screenHeight * SNESConstants.bytesPerPixel
-    var frontBuffer: UnsafeMutableBufferPointer<UInt8>
-    var backBuffer: UnsafeMutableBufferPointer<UInt8>
+    var frontBuffer: UnsafeMutableRawBufferPointer
+    var backBuffer: UnsafeMutableRawBufferPointer
+    private var frontBuffer32: UnsafeMutableBufferPointer<UInt32>
+    private var backBuffer32: UnsafeMutableBufferPointer<UInt32>
 
     // Registers
     var inidisp: UInt8 = 0x80   // $2100 - forced blank on
@@ -57,6 +91,7 @@ final class PPU {
     private var cgramAddr: UInt16 = 0
     private var cgramLatch: UInt8 = 0
     private var cgramFlipFlop = false
+    private(set) var cgramColorCache = [UInt32](repeating: 0xFF00_0000, count: 256)
 
     // Mode 7
     var m7sel: UInt8 = 0
@@ -128,31 +163,168 @@ final class PPU {
     }
 
     // Color math / subscreen support
-    private var subScreenBuffer: UnsafeMutableBufferPointer<UInt8>
+    private var subScreenBuffer: UnsafeMutableRawBufferPointer
+    private var subScreenBuffer32: UnsafeMutableBufferPointer<UInt32>
     private var mainLayerLine = [UInt8](repeating: 0, count: 256) // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
     private var subLayerLine = [UInt8](repeating: 0, count: 256)  // 0=backdrop, 1=BG1..4=BG4, 5=OBJ1, 6=OBJ2
     private var pixelZ = [UInt8](repeating: 0, count: 256)  // z-order per pixel for priority compositing
     private var _renderingSubScreen = false
     private var _currentLayer: UInt8 = 0
+    var gpuRenderingAvailable = false
+    private(set) var usesGPURenderingThisFrame = false
+    private(set) var gpuLineStates = [GPULineState](repeating: GPULineState(), count: SNESConstants.screenHeight)
+    private(set) var gpuSpriteCounts = [UInt32](repeating: 0, count: SNESConstants.screenHeight)
+    private(set) var gpuSpriteIndices = [UInt16](repeating: 0, count: SNESConstants.screenHeight * 32)
 
     init() {
-        let frontPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: fbSize)
-        frontPtr.initialize(repeating: 0, count: fbSize)
-        frontBuffer = UnsafeMutableBufferPointer(start: frontPtr, count: fbSize)
+        let frontPtr = UnsafeMutableRawPointer.allocate(byteCount: fbSize, alignment: MemoryLayout<UInt32>.alignment)
+        let frontWordPtr = frontPtr.bindMemory(to: UInt32.self, capacity: fbPixelCount)
+        frontWordPtr.initialize(repeating: 0, count: fbPixelCount)
+        frontBuffer = UnsafeMutableRawBufferPointer(start: frontPtr, count: fbSize)
+        frontBuffer32 = UnsafeMutableBufferPointer(start: frontWordPtr, count: fbPixelCount)
 
-        let backPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: fbSize)
-        backPtr.initialize(repeating: 0, count: fbSize)
-        backBuffer = UnsafeMutableBufferPointer(start: backPtr, count: fbSize)
+        let backPtr = UnsafeMutableRawPointer.allocate(byteCount: fbSize, alignment: MemoryLayout<UInt32>.alignment)
+        let backWordPtr = backPtr.bindMemory(to: UInt32.self, capacity: fbPixelCount)
+        backWordPtr.initialize(repeating: 0, count: fbPixelCount)
+        backBuffer = UnsafeMutableRawBufferPointer(start: backPtr, count: fbSize)
+        backBuffer32 = UnsafeMutableBufferPointer(start: backWordPtr, count: fbPixelCount)
 
-        let subPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: fbSize)
-        subPtr.initialize(repeating: 0, count: fbSize)
-        subScreenBuffer = UnsafeMutableBufferPointer(start: subPtr, count: fbSize)
+        let subPtr = UnsafeMutableRawPointer.allocate(byteCount: fbSize, alignment: MemoryLayout<UInt32>.alignment)
+        let subWordPtr = subPtr.bindMemory(to: UInt32.self, capacity: fbPixelCount)
+        subWordPtr.initialize(repeating: 0, count: fbPixelCount)
+        subScreenBuffer = UnsafeMutableRawBufferPointer(start: subPtr, count: fbSize)
+        subScreenBuffer32 = UnsafeMutableBufferPointer(start: subWordPtr, count: fbPixelCount)
     }
 
     deinit {
         frontBuffer.baseAddress?.deallocate()
         backBuffer.baseAddress?.deallocate()
         subScreenBuffer.baseAddress?.deallocate()
+    }
+
+    @inline(__always)
+    private static func packColor(r: UInt8, g: UInt8, b: UInt8) -> UInt32 {
+        UInt32(r) | (UInt32(g) << 8) | (UInt32(b) << 16) | 0xFF00_0000
+    }
+
+    @inline(__always)
+    private func updateCGRAMColorCache(index: Int) {
+        let addr = (index * 2) & 0x1FF
+        let lo = UInt16(cgram[addr])
+        let hi = UInt16(cgram[(addr + 1) & 0x1FF])
+        let bgr = lo | (hi << 8)
+        let r = UInt8(((bgr >> 0) & 0x1F) << 3)
+        let g = UInt8(((bgr >> 5) & 0x1F) << 3)
+        let b = UInt8(((bgr >> 10) & 0x1F) << 3)
+        cgramColorCache[index & 0xFF] = Self.packColor(r: r, g: g, b: b)
+    }
+
+    private func rebuildCGRAMColorCache() {
+        for index in 0..<256 {
+            updateCGRAMColorCache(index: index)
+        }
+    }
+
+    @inline(__always)
+    private static func pixelValue(_ pixels: UInt64, fineX: Int) -> UInt8 {
+        UInt8(truncatingIfNeeded: pixels >> (fineX << 3))
+    }
+
+    @inline(__always)
+    private func windowMaskBit(for layer: UInt8) -> UInt8 {
+        switch layer {
+        case 1...4:
+            return UInt8(1 << (layer - 1))
+        case 5, 6:
+            return 0x10
+        default:
+            return 0
+        }
+    }
+
+    private func shouldUseGPURendering() -> Bool {
+        guard gpuRenderingAvailable else { return false }
+        switch bgmode & 0x07 {
+        case 0, 1, 2, 3, 4, 5, 6, 7:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func recordGPULineState(_ y: Int) {
+        var state = GPULineState()
+        state.control = SIMD4(
+            UInt32(inidisp),
+            UInt32(bgmode),
+            UInt32(tm),
+            UInt32(objsel)
+        )
+        state.bgSC = SIMD4(
+            UInt32(bg1sc),
+            UInt32(bg2sc),
+            UInt32(bg3sc),
+            UInt32(bg4sc)
+        )
+        state.bgHScroll = SIMD4(
+            UInt32(bgHScroll[0]),
+            UInt32(bgHScroll[1]),
+            UInt32(bgHScroll[2]),
+            UInt32(bgHScroll[3])
+        )
+        state.bgVScroll = SIMD4(
+            UInt32(bgVScroll[0]),
+            UInt32(bgVScroll[1]),
+            UInt32(bgVScroll[2]),
+            UInt32(bgVScroll[3])
+        )
+        state.extras = SIMD4(
+            UInt32(bg12nba),
+            UInt32(bg34nba),
+            UInt32(m7sel),
+            UInt32(setini)
+        )
+        state.colorMath = SIMD4(
+            UInt32(cgwsel),
+            UInt32(cgadsub),
+            Self.packColor(
+                r: fixedColorR << 3,
+                g: fixedColorG << 3,
+                b: fixedColorB << 3
+            ),
+            UInt32(ts)
+        )
+        state.windows = SIMD4(
+            UInt32(w12sel),
+            UInt32(w34sel),
+            UInt32(wobjsel),
+            UInt32(wbglog)
+        )
+        state.windowRanges = SIMD4(
+            UInt32(wobjlog),
+            UInt32(wh0),
+            UInt32(wh1),
+            UInt32(wh2)
+        )
+        state.windowControl = SIMD4(
+            UInt32(wh3),
+            UInt32(tmw),
+            UInt32(tsw),
+            0
+        )
+        state.mode7ABCD = SIMD4(
+            UInt32(m7a),
+            UInt32(m7b),
+            UInt32(m7c),
+            UInt32(m7d)
+        )
+        state.mode7XY = SIMD4(
+            UInt32(m7x),
+            UInt32(m7y),
+            0,
+            0
+        )
+        gpuLineStates[y] = state
     }
 
     // MARK: - Register access
@@ -323,8 +495,10 @@ final class PPU {
             if !cgramFlipFlop {
                 cgramLatch = value
             } else {
+                let colorIndex = Int(cgramAddr >> 1) & 0xFF
                 cgram[Int(cgramAddr) & 0x1FE] = cgramLatch
                 cgram[Int(cgramAddr | 1) & 0x1FF] = value & 0x7F
+                updateCGRAMColorCache(index: colorIndex)
                 cgramAddr += 2
             }
             cgramFlipFlop.toggle()
@@ -362,17 +536,21 @@ final class PPU {
         // Build sprite cache once at the start of each frame
         if y == 0 {
             buildSpriteScanlineCache()
+            usesGPURenderingThisFrame = shouldUseGPURendering()
         }
+
+        if usesGPURenderingThisFrame {
+            recordGPULineState(y)
+            return
+        }
+
+        let linePixelOffset = y * SNESConstants.screenWidth
+        let lineOffset = y * SNESConstants.screenWidth * 4
 
         // Forced blank - render black
         if (inidisp & 0x80) != 0 {
-            let offset = y * SNESConstants.screenWidth * 4
             for x in 0..<SNESConstants.screenWidth {
-                let idx = offset + x * 4
-                backBuffer[idx + 0] = 0
-                backBuffer[idx + 1] = 0
-                backBuffer[idx + 2] = 0
-                backBuffer[idx + 3] = 255
+                backBuffer32[linePixelOffset + x] = 0xFF00_0000
             }
             return
         }
@@ -380,18 +558,9 @@ final class PPU {
         let mode = bgmode & 0x07
 
         // Clear scanline to backdrop color
-        let backdropR: UInt8
-        let backdropG: UInt8
-        let backdropB: UInt8
-        (backdropR, backdropG, backdropB) = colorFromCGRAM(index: 0)
-
-        let offset = y * SNESConstants.screenWidth * 4
+        let backdropColor = cgramColorCache[0]
         for x in 0..<SNESConstants.screenWidth {
-            let idx = offset + x * 4
-            backBuffer[idx + 0] = backdropR
-            backBuffer[idx + 1] = backdropG
-            backBuffer[idx + 2] = backdropB
-            backBuffer[idx + 3] = 255
+            backBuffer32[linePixelOffset + x] = backdropColor
             mainLayerLine[x] = 0  // backdrop
         }
 
@@ -409,11 +578,7 @@ final class PPU {
             if blendWithSubScreen {
                 // The subscreen always starts from backdrop for the current scanline.
                 for x in 0..<256 {
-                    let idx = offset + x * 4
-                    subScreenBuffer[idx + 0] = backdropR
-                    subScreenBuffer[idx + 1] = backdropG
-                    subScreenBuffer[idx + 2] = backdropB
-                    subScreenBuffer[idx + 3] = 255
+                    subScreenBuffer32[linePixelOffset + x] = backdropColor
                     subLayerLine[x] = 0
                 }
                 if ts != 0 {
@@ -425,7 +590,7 @@ final class PPU {
                 }
             }
 
-            applyColorMath(offset: offset, blendWithSubScreen: blendWithSubScreen)
+            applyColorMath(offset: lineOffset, blendWithSubScreen: blendWithSubScreen)
         }
     }
 
@@ -470,13 +635,20 @@ final class PPU {
         let belowMask = (cgwsel >> 4) & 0x03
         let subtract = (cgadsub & 0x80) != 0
         let half = (cgadsub & 0x40) != 0
+        let useColorWindow = aboveMask != 0 || belowMask != 0
+        let fixedR = Int(fixedColorR) << 3
+        let fixedG = Int(fixedColorG) << 3
+        let fixedB = Int(fixedColorB) << 3
+        let linePixelOffset = offset >> 2
 
         for x in 0..<256 {
             // Window-gated color math is only applied where both masks allow it.
             // This is a conservative approximation of the full above/below window logic.
-            guard colorWindowAllows(mask: aboveMask, screenX: x),
-                  colorWindowAllows(mask: belowMask, screenX: x) else {
-                continue
+            if useColorWindow {
+                guard colorWindowAllows(mask: aboveMask, screenX: x),
+                      colorWindowAllows(mask: belowMask, screenX: x) else {
+                    continue
+                }
             }
 
             let layer = mainLayerLine[x]
@@ -511,9 +683,9 @@ final class PPU {
                 // an actual layer, not just the fixed/backdrop color path.
                 shouldHalf = half && subLayerLine[x] != 0
             } else {
-                subR = Int(fixedColorR) << 3
-                subG = Int(fixedColorG) << 3
-                subB = Int(fixedColorB) << 3
+                subR = fixedR
+                subG = fixedG
+                subB = fixedB
                 shouldHalf = half
             }
 
@@ -526,9 +698,11 @@ final class PPU {
 
             if shouldHalf { r >>= 1; g >>= 1; b >>= 1 }
 
-            backBuffer[idx + 0] = UInt8(max(0, min(255, r)))
-            backBuffer[idx + 1] = UInt8(max(0, min(255, g)))
-            backBuffer[idx + 2] = UInt8(max(0, min(255, b)))
+            backBuffer32[linePixelOffset + x] = Self.packColor(
+                r: UInt8(max(0, min(255, r))),
+                g: UInt8(max(0, min(255, g))),
+                b: UInt8(max(0, min(255, b)))
+            )
         }
     }
 
@@ -558,7 +732,7 @@ final class PPU {
 
         let screenY = scanline + vScroll
 
-        let offset = scanline * SNESConstants.screenWidth * 4
+        let lineOffset = scanline * SNESConstants.screenWidth
 
         // Tile-first loop: compute tilemap + chr reads once per 8px tile column
         var screenX = 0
@@ -621,6 +795,10 @@ final class PPU {
             let bp1 = vram[(chrAddr + 1) & 0xFFFF]
             let bp2 = vram[(chrAddr + 16) & 0xFFFF]
             let bp3 = vram[(chrAddr + 17) & 0xFFFF]
+            let pixelRowLow = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+            let pixelRowHigh = Self.bitplanePairPixelTable[Int(bp2) | (Int(bp3) << 8)]
+            let pixelRow = pixelRowLow | (pixelRowHigh &* 4)
+            let paletteOffset = palette << 4
 
             // How many pixels of this 8px tile are visible starting from screenX
             let firstFine = px & 7
@@ -629,17 +807,11 @@ final class PPU {
             // Inner loop: extract bits for each pixel in this tile slice
             for i in 0..<pixelsInTile {
                 let fineX = hFlip ? (7 - (firstFine + i)) : (firstFine + i)
-                let bit = 7 - fineX
-                let pixel = ((bp0 >> bit) & 1) |
-                            (((bp1 >> bit) & 1) << 1) |
-                            (((bp2 >> bit) & 1) << 2) |
-                            (((bp3 >> bit) & 1) << 3)
+                let pixel = Self.pixelValue(pixelRow, fineX: fineX)
 
                 if pixel != 0 {
-                    let colorIdx = palette * 16 + Int(pixel)
-                    let (r, g, b) = colorFromCGRAM(index: colorIdx)
-                    let idx = offset + (screenX + i) * 4
-                    writePixel(idx, screenX + i, r: r, g: g, b: b, z: tileZ)
+                    let colorIdx = paletteOffset + Int(pixel)
+                    writePixel(lineOffset + screenX + i, screenX + i, color: cgramColorCache[colorIdx], z: tileZ)
                 }
             }
 
@@ -670,7 +842,7 @@ final class PPU {
         let hScroll = Int(bgHScroll[bg]) & 0x3FF
         let vScroll = Int(bgVScroll[bg]) & 0x3FF
         let screenY = scanline + vScroll
-        let offset = scanline * SNESConstants.screenWidth * 4
+        let lineOffset = scanline * SNESConstants.screenWidth
 
         var screenX = 0
         while screenX < 256 {
@@ -720,27 +892,21 @@ final class PPU {
             let bp5 = vram[(chrAddr + 33) & 0xFFFF]
             let bp6 = vram[(chrAddr + 48) & 0xFFFF]
             let bp7 = vram[(chrAddr + 49) & 0xFFFF]
+            let pixelRow01 = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+            let pixelRow23 = Self.bitplanePairPixelTable[Int(bp2) | (Int(bp3) << 8)]
+            let pixelRow45 = Self.bitplanePairPixelTable[Int(bp4) | (Int(bp5) << 8)]
+            let pixelRow67 = Self.bitplanePairPixelTable[Int(bp6) | (Int(bp7) << 8)]
+            let pixelRow = pixelRow01 | (pixelRow23 &* 4) | (pixelRow45 &* 16) | (pixelRow67 &* 64)
 
             let firstFine = px & 7
             let pixelsInTile = min(8 - firstFine, 256 - screenX)
 
             for i in 0..<pixelsInTile {
                 let fineX = hFlip ? (7 - (firstFine + i)) : (firstFine + i)
-                let bit = 7 - fineX
-                let pixel = ((bp0 >> bit) & 1) |
-                            (((bp1 >> bit) & 1) << 1) |
-                            (((bp2 >> bit) & 1) << 2) |
-                            (((bp3 >> bit) & 1) << 3) |
-                            (((bp4 >> bit) & 1) << 4) |
-                            (((bp5 >> bit) & 1) << 5) |
-                            (((bp6 >> bit) & 1) << 6) |
-                            (((bp7 >> bit) & 1) << 7)
+                let pixel = Self.pixelValue(pixelRow, fineX: fineX)
 
                 if pixel != 0 {
-                    let colorIdx = Int(pixel)
-                    let (r, g, b) = colorFromCGRAM(index: colorIdx)
-                    let idx = offset + (screenX + i) * 4
-                    writePixel(idx, screenX + i, r: r, g: g, b: b, z: tileZ)
+                    writePixel(lineOffset + screenX + i, screenX + i, color: cgramColorCache[Int(pixel)], z: tileZ)
                 }
             }
 
@@ -774,7 +940,7 @@ final class PPU {
 
         let screenY = scanline + vScroll
 
-        let offset = scanline * SNESConstants.screenWidth * 4
+        let lineOffset = scanline * SNESConstants.screenWidth
 
         // Tile-first loop: compute tilemap + chr reads once per 8px tile column
         var screenX = 0
@@ -834,6 +1000,8 @@ final class PPU {
             let chrAddr = chrBase + tileNum * 16 + fineY * 2
             let bp0 = vram[chrAddr & 0xFFFF]
             let bp1 = vram[(chrAddr + 1) & 0xFFFF]
+            let pixelRow = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+            let paletteOffset = paletteBase + palette * 4
 
             // How many pixels of this 8px tile are visible starting from screenX
             let firstFine = px & 7
@@ -842,14 +1010,11 @@ final class PPU {
             // Inner loop: extract bits for each pixel in this tile slice
             for i in 0..<pixelsInTile {
                 let fineX = hFlip ? (7 - (firstFine + i)) : (firstFine + i)
-                let bit = 7 - fineX
-                let pixel = ((bp0 >> bit) & 1) | (((bp1 >> bit) & 1) << 1)
+                let pixel = Self.pixelValue(pixelRow, fineX: fineX)
 
                 if pixel != 0 {
-                    let colorIdx = paletteBase + palette * 4 + Int(pixel)
-                    let (r, g, b) = colorFromCGRAM(index: colorIdx)
-                    let idx = offset + (screenX + i) * 4
-                    writePixel(idx, screenX + i, r: r, g: g, b: b, z: tileZ)
+                    let colorIdx = paletteOffset + Int(pixel)
+                    writePixel(lineOffset + screenX + i, screenX + i, color: cgramColorCache[colorIdx], z: tileZ)
                 }
             }
 
@@ -861,6 +1026,15 @@ final class PPU {
         // Clear all scanline lists
         for i in 0..<224 {
             spriteScanlineCache[i].removeAll(keepingCapacity: true)
+            gpuSpriteCounts[i] = 0
+        }
+
+        func appendSprite(_ spriteIndex: Int, to scanline: Int) {
+            guard gpuSpriteCounts[scanline] < 32 else { return }
+            spriteScanlineCache[scanline].append(spriteIndex)
+            let count = Int(gpuSpriteCounts[scanline])
+            gpuSpriteIndices[scanline * 32 + count] = UInt16(spriteIndex)
+            gpuSpriteCounts[scanline] += 1
         }
 
         let baseSize: Int
@@ -886,10 +1060,18 @@ final class PPU {
             let spriteSize = isLarge ? largeSize : baseSize
             let spriteY = (Int(oam[i * 4 + 1]) + 1) & 0xFF
 
-            for scanline in 0..<224 {
-                let relY = (scanline - spriteY) & 0xFF
-                if relY < spriteSize && spriteScanlineCache[scanline].count < 32 {
-                    spriteScanlineCache[scanline].append(i)
+            if spriteY < 224 {
+                let end = min(spriteY + spriteSize, 224)
+                for scanline in spriteY..<end {
+                    appendSprite(i, to: scanline)
+                }
+            }
+
+            let wrappedEnd = spriteY + spriteSize - 256
+            if wrappedEnd > 0 {
+                let end = min(wrappedEnd, 224)
+                for scanline in 0..<end {
+                    appendSprite(i, to: scanline)
                 }
             }
         }
@@ -901,7 +1083,7 @@ final class PPU {
         // Tilemap: 128x128 entries at even byte addresses (byte 0, 2, 4, ...)
         // Tile data: 8x8 256-color pixels at odd byte addresses
 
-        let offset = scanline * SNESConstants.screenWidth * 4
+        let lineOffset = scanline * SNESConstants.screenWidth
 
         // Sign-extend Mode 7 parameters (13-bit signed values for center, 16-bit signed for matrix)
         let a = Int32(Int16(bitPattern: m7a))
@@ -953,9 +1135,7 @@ final class PPU {
                     let tileDataAddr = (fy * 8 + fx) * 2 + 1
                     let colorIdx = Int(vram[tileDataAddr & 0xFFFF])
                     if colorIdx != 0 {
-                        let (r, g, bb) = colorFromCGRAM(index: colorIdx)
-                        let idx = offset + screenX * 4
-                        writePixel(idx, screenX, r: r, g: g, b: bb, z: zOrder)
+                        writePixel(lineOffset + screenX, screenX, color: cgramColorCache[colorIdx], z: zOrder)
                     }
                     continue
                 default:
@@ -978,9 +1158,7 @@ final class PPU {
             let colorIdx = Int(vram[tileDataAddr & 0xFFFF])
 
             if colorIdx != 0 {
-                let (r, g, bb) = colorFromCGRAM(index: colorIdx)
-                let idx = offset + screenX * 4
-                writePixel(idx, screenX, r: r, g: g, b: bb, z: zOrder)
+                writePixel(lineOffset + screenX, screenX, color: cgramColorCache[colorIdx], z: zOrder)
             }
         }
     }
@@ -1001,7 +1179,7 @@ final class PPU {
         let nameBase = Int(objsel & 0x07) << 14
         let nameGap = ((Int(objsel >> 3) & 0x03) + 1) << 13
 
-        let offset = scanline * SNESConstants.screenWidth * 4
+        let lineOffset = scanline * SNESConstants.screenWidth
 
         // Process only sprites cached for this scanline
         guard scanline < 224 else { return }
@@ -1064,23 +1242,22 @@ final class PPU {
                 let bp1 = vram[(chrAddr + 1) & 0xFFFF]
                 let bp2 = vram[(chrAddr + 16) & 0xFFFF]
                 let bp3 = vram[(chrAddr + 17) & 0xFFFF]
+                let pixelRowLow = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+                let pixelRowHigh = Self.bitplanePairPixelTable[Int(bp2) | (Int(bp3) << 8)]
+                let pixelRow = pixelRowLow | (pixelRowHigh &* 4)
+                let paletteOffset = 128 + (palette - 8) * 16
 
                 for px in 0..<8 {
                     let screenX = drawX + px
                     guard screenX >= 0, screenX < SNESConstants.screenWidth else { continue }
 
-                    let bit = hFlip ? px : (7 - px)
-                    let pixel = ((bp0 >> bit) & 1) |
-                                (((bp1 >> bit) & 1) << 1) |
-                                (((bp2 >> bit) & 1) << 2) |
-                                (((bp3 >> bit) & 1) << 3)
+                    let fineX = hFlip ? (7 - px) : px
+                    let pixel = Self.pixelValue(pixelRow, fineX: fineX)
 
                     if pixel != 0 {
-                        let colorIdx = 128 + (palette - 8) * 16 + Int(pixel)
-                        let (r, g, b) = colorFromCGRAM(index: colorIdx)
-                        let idx = offset + screenX * 4
+                        let colorIdx = paletteOffset + Int(pixel)
                         let sourceLayer: UInt8 = palette >= 12 ? 6 : 5
-                        writePixel(idx, screenX, r: r, g: g, b: b, z: spriteZ, sourceLayer: sourceLayer)
+                        writePixel(lineOffset + screenX, screenX, color: cgramColorCache[colorIdx], z: spriteZ, sourceLayer: sourceLayer)
                     }
                 }
             }
@@ -1090,32 +1267,35 @@ final class PPU {
     // Convert 15-bit BGR from CGRAM to RGB8
     @inline(__always)
     private func colorFromCGRAM(index: Int) -> (UInt8, UInt8, UInt8) {
-        let addr = (index * 2) & 0x1FF
-        let lo = UInt16(cgram[addr])
-        let hi = UInt16(cgram[addr + 1])
-        let bgr = lo | (hi << 8)
-        let r = UInt8(((bgr >> 0) & 0x1F) << 3)
-        let g = UInt8(((bgr >> 5) & 0x1F) << 3)
-        let b = UInt8(((bgr >> 10) & 0x1F) << 3)
-        return (r, g, b)
+        let color = cgramColorCache[index & 0xFF]
+        return (
+            UInt8(truncatingIfNeeded: color),
+            UInt8(truncatingIfNeeded: color >> 8),
+            UInt8(truncatingIfNeeded: color >> 16)
+        )
     }
 
     /// Write a pixel to the active render target with z-order priority check
     @inline(__always)
-    private func writePixel(_ idx: Int, _ screenX: Int, r: UInt8, g: UInt8, b: UInt8, z: UInt8 = 255, sourceLayer: UInt8? = nil) {
+    private func writePixel(_ pixelIndex: Int, _ screenX: Int, color: UInt32, z: UInt8 = 255, sourceLayer: UInt8? = nil) {
         guard z >= pixelZ[screenX] else { return }
-        pixelZ[screenX] = z
         let resolvedLayer = sourceLayer ?? _currentLayer
+        let windowMask = _renderingSubScreen ? tsw : tmw
+        let windowBit = windowMaskBit(for: resolvedLayer)
+        if windowBit != 0 && (windowMask & windowBit) != 0 {
+            let windowLayer = resolvedLayer >= 5 ? 5 : Int(resolvedLayer)
+            if isWindowMasked(layer: windowLayer, screenX: screenX) {
+                return
+            }
+        }
+
         if !_renderingSubScreen {
-            if isWindowMasked(layer: Int(_currentLayer), screenX: screenX) { return }
-            backBuffer[idx + 0] = r
-            backBuffer[idx + 1] = g
-            backBuffer[idx + 2] = b
+            pixelZ[screenX] = z
+            backBuffer32[pixelIndex] = color
             mainLayerLine[screenX] = resolvedLayer
         } else {
-            subScreenBuffer[idx + 0] = r
-            subScreenBuffer[idx + 1] = g
-            subScreenBuffer[idx + 2] = b
+            pixelZ[screenX] = z
+            subScreenBuffer32[pixelIndex] = color
             subLayerLine[screenX] = resolvedLayer
         }
     }
@@ -1317,5 +1497,39 @@ final class PPU {
 
     func swapBuffers() {
         swap(&frontBuffer, &backBuffer)
+        swap(&frontBuffer32, &backBuffer32)
+    }
+
+    func captureSnapshot() -> Snapshot {
+        Snapshot(
+            scrollLatch: scrollLatch,
+            vramPrefetch: vramPrefetch,
+            fixedColorR: fixedColorR,
+            fixedColorG: fixedColorG,
+            fixedColorB: fixedColorB,
+            oamAddr: oamAddr,
+            oamLatch: oamLatch,
+            cgramAddr: cgramAddr,
+            cgramLatch: cgramLatch,
+            cgramFlipFlop: cgramFlipFlop,
+            m7Latch: m7Latch,
+            mpyResult: mpyResult
+        )
+    }
+
+    func restoreSnapshot(_ snapshot: Snapshot) {
+        scrollLatch = snapshot.scrollLatch
+        vramPrefetch = snapshot.vramPrefetch
+        fixedColorR = snapshot.fixedColorR
+        fixedColorG = snapshot.fixedColorG
+        fixedColorB = snapshot.fixedColorB
+        oamAddr = snapshot.oamAddr
+        oamLatch = snapshot.oamLatch
+        cgramAddr = snapshot.cgramAddr
+        cgramLatch = snapshot.cgramLatch
+        cgramFlipFlop = snapshot.cgramFlipFlop
+        m7Latch = snapshot.m7Latch
+        mpyResult = snapshot.mpyResult
+        rebuildCGRAMColorCache()
     }
 }

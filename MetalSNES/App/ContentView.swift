@@ -81,11 +81,25 @@ struct ContentView: View {
                 }
             }
             ToolbarItem {
+                Menu("Latency") {
+                    Picker("Run Ahead", selection: $viewModel.runAheadFrames) {
+                        Text("Off").tag(0)
+                        Text("1 Frame").tag(1)
+                    }
+                    Text("Run-ahead cuts input latency, not frame pacing.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            ToolbarItem {
                 Toggle("Debug", isOn: $showDebug)
             }
         }
         .sheet(isPresented: $showInputSettings) {
             InputConfigurationView(inputManager: viewModel.inputManager)
+        }
+        .onChange(of: showDebug) { _, isShown in
+            viewModel.setDebugUIEnabled(isShown)
         }
         .onAppear {
             let args = ProcessInfo.processInfo.arguments
@@ -116,10 +130,6 @@ struct ContentView: View {
                         viewModel.toggleEmulation()
                     }
                 }
-            }
-            // Run PPU unit tests in background (no ROM test — that's too slow)
-            DispatchQueue.global(qos: .userInitiated).async {
-                PPUDiagnostic.runAll()
             }
         }
     }
@@ -375,6 +385,8 @@ struct DebugSidebar: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                PacingDebugView(debugState: debugState)
+                Divider()
                 RegisterView(debugState: debugState)
                 Divider()
                 PPURegisterView(debugState: debugState)
@@ -388,6 +400,29 @@ struct DebugSidebar: View {
                 MemoryViewer(debugState: debugState)
             }
             .padding()
+        }
+    }
+}
+
+struct PacingDebugView: View {
+    @ObservedObject var debugState: DebugState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Pacing")
+                .font(.headline)
+            Text(String(format: "Display avg %.3f ms, worst %.3f ms",
+                        debugState.pacingAverageDisplayIntervalMs,
+                        debugState.pacingWorstDisplayIntervalMs))
+            Text(String(format: "Frame age avg %.3f ms, worst %.3f ms",
+                        debugState.pacingAverageFrameAgeMs,
+                        debugState.pacingWorstFrameAgeMs))
+            Text("Frames produced/presented: \(debugState.pacingProducedFrames)/\(debugState.pacingPresentedFrames)")
+            Text("Repeated/dropped presents: \(debugState.pacingRepeatedFrames)/\(debugState.pacingDroppedFrames)")
+            Text(String(format: "Audio buffered %d, correction %.3f ms",
+                        debugState.pacingAudioBufferedSamples,
+                        debugState.pacingAudioCorrectionMs))
+            Text("Audio underruns/overruns: \(debugState.pacingAudioUnderruns)/\(debugState.pacingAudioOverruns)")
         }
     }
 }

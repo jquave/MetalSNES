@@ -71,6 +71,7 @@ final class Bus {
     /// WRAM watchpoint: set to a WRAM address to log writes. -1 = disabled.
     var wramWatchpoint: Int = -1
     var wramWatchLog: [(UInt32, UInt8)] = []  // (caller fullAddress, value)
+    var captureCPUWriteLog = false
     var cpuWriteLog: [(pc: UInt32, opcode: UInt8, target: UInt32, value: UInt8)] = []
 
     @inline(__always)
@@ -126,13 +127,14 @@ final class Bus {
         }()
 
         guard isAPUPort || isSoundMirror || isNMITimen else { return }
+        guard captureCPUWriteLog || EmulatorCore.debugLogging else { return }
 
         cpuWriteLog.append((callerPC, opcode, targetAddress, value))
         if cpuWriteLog.count > 512 {
             cpuWriteLog.removeFirst(cpuWriteLog.count - 512)
         }
 
-        if cpuWriteLog.count <= 120 {
+        if EmulatorCore.debugLogging && cpuWriteLog.count <= 120 {
             print(String(format: "[CPU-WRITE] pc=$%06X op=$%02X target=$%06X value=$%02X",
                          callerPC, opcode, targetAddress, value))
             fflush(stdout)

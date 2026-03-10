@@ -1,5 +1,148 @@
 # MetalSNES Development Log
 
+## 2026-03-10: Hybrid Metal PPU Path for Common Frames
+
+### Findings
+- The previous "Metal renderer" was only presenting a CPU-rendered RGBA framebuffer. The expensive tile/sprite composition work was still entirely in `PPU.swift`.
+- A full accuracy-first GPU rewrite would need mid-frame VRAM/OAM/CGRAM history for raster effects, which is larger than a single-pass optimization change.
+- The practical first step is a hybrid path:
+  - use Metal compute for common frames where the current renderer does not need color math or window masking,
+  - keep the existing CPU renderer as the correctness fallback for everything else.
+
+### Changes
+- Added a GPU frame-state path in `PPU.swift`:
+  - per-scanline render state snapshots (`GPULineState`),
+  - flattened per-scanline sprite caches for GPU consumption,
+  - and per-frame selection between CPU rendering and the new Metal path.
+- Extended `Shaders.metal` with a compute kernel that renders:
+  - modes 0/1/2/3/4/5/6/7 using the current simplified repo behavior,
+  - tilemap backgrounds from VRAM/CGRAM state,
+  - sprite composition with the same priority ordering used by the CPU path,
+  - and writes directly into the Metal texture before the presentation pass.
+- Reworked `MetalRenderer.swift` so it can either:
+  - upload a CPU framebuffer, or
+  - upload VRAM/OAM/palette/scanline-state buffers and run the compute PPU pass.
+- `EmulatorCore.swift` now selects the GPU renderer only when the Metal path is available; benchmark and headless paths continue to use the CPU renderer.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- CPU fallback benchmark still works:
+  - `120 frames in 9.947 sec = 12.1 FPS`
+  - `CPU+SPC: 4165 ms (42%), PPU: 5777 ms (58%)`
+- A 5-second GUI smoke run of `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --rom mario.sfc` produced no captured runtime/shader errors.
+
+## 2026-03-10: Hybrid Metal PPU Path Expansion for Subscreen Color Math
+
+### Findings
+- The first Metal PPU pass still fell back to the CPU whenever `C GWSEL` requested blending with the subscreen and `TS` enabled any real layers.
+- That left a meaningful amount of common SNES transparency work on the CPU even when the frame did not use any window masks.
+- Supporting the no-window subscreen case is a good next step because it materially expands GPU coverage without needing a full rewrite of the window system or raster-history handling.
+
+### Changes
+- `PPU.swift` no longer rejects GPU rendering solely because the subscreen mask `TS` is non-zero.
+- `Shaders.metal` now factors layer composition into a reusable helper and renders both:
+  - the main screen from `TM`, and
+  - the subscreen from `TS` when color math blends against the subscreen.
+- The Metal color-math path now matches the existing CPU approximation more closely by:
+  - using the actual subscreen pixel instead of always falling back to backdrop,
+  - and only applying half-color on subscreen blends when the below pixel is a real layer rather than plain backdrop.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded after the shader changes.
+- A fresh 5-second GUI smoke run of `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --rom mario.sfc` again produced no captured runtime/shader errors.
+
+## 2026-03-10: Metal Window Masks + DSP/APU Hot-Path Cleanup
+
+### Findings
+- After subscreen blending support, the next major GPU coverage gap was window handling:
+  - main-screen layer windows (`TMW`) still forced CPU fallback,
+  - and color-window masks in `CGWSEL` still forced CPU fallback even when the frame used no subscreen windowing.
+- Separately, the audio path still did avoidable diagnostic work in normal runs:
+  - several APU/DSP hot paths formatted debug strings before `diagLog()` discarded them,
+  - and DSP diagnostic file setup still happened eagerly at startup instead of only when debugging was actually enabled.
+
+### Changes
+- Expanded the Metal PPU path to cover the repo's current window behavior for the main screen:
+  - added window register state to `GPULineState`,
+  - ported per-layer window masking logic for BG1-BG4 and OBJ into `Shaders.metal`,
+  - ported color-window gating for color math,
+  - and relaxed GPU eligibility so frames no longer fall back solely because `TMW` or color-window masks are in use.
+- Kept `TSW` as the remaining unsupported window case, so frames using sub-screen window masking still fall back to the CPU path.
+- Cleaned up APU/DSP diagnostics:
+  - debug string formatting on CPU→SPC and DSP register/KON paths is now gated by `EmulatorCore.debugLogging`,
+  - DSP periodic diagnostic string construction is skipped when debug logging is off,
+  - and the `/tmp/dsp_diag.log` file is now opened lazily only when a diagnostic write is actually needed.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- CPU benchmark:
+  - previous isolated baseline: `120 frames in 9.947 sec = 12.1 FPS`
+  - after this pass: `120 frames in 9.791 sec = 12.3 FPS`
+  - `CPU+SPC` time dropped from `4165 ms` to `3983 ms` in the current benchmark path.
+- A fresh 5-second GUI smoke run of `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --rom mario.sfc` produced no captured runtime/shader errors.
+
+## 2026-03-10: TSW Sub-screen Windows + Headless GPU Benchmark
+
+### Findings
+- The CPU renderer still did not apply `TSW` sub-screen window masking at all; it only respected `TMW` on the main screen.
+- That meant the Metal path could not honestly support `TSW` until the baseline renderer was fixed too.
+- The project also still lacked a way to measure GPU composition directly. The existing `--benchmark` mode only exercised the CPU path, so it could not answer whether the Apple Silicon renderer was actually helping.
+
+### Changes
+- Fixed sub-screen window masking in `PPU.swift` by applying the same layer-window rules to the sub-screen path, using `TSW` instead of `TMW`.
+- Expanded the Metal PPU path to support `TSW` as well:
+  - the compute shader now chooses main-screen vs sub-screen window enable bits when composing layers,
+  - and GPU eligibility no longer rejects frames solely because `TSW` is non-zero.
+- Added a new CLI benchmark mode:
+  - `--benchmark` keeps the CPU-only benchmark behavior,
+  - `--benchmark-gpu` creates a headless `MetalRenderer`, runs the Metal PPU path offscreen, and measures the real compute/presentation cost without a visible window.
+- Updated `EmulatorCore.benchmark()` to time frame presentation separately so the GPU benchmark can distinguish CPU+SPC, PPU scanline work, and Metal presentation cost.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded after the `TSW` and benchmark changes.
+- CPU benchmark after the `TSW` fix:
+  - `120 frames in 9.867 sec = 12.2 FPS`
+  - `CPU+SPC: 4041 ms (41%), PPU: 5822 ms (59%), Present: 0 ms (0%)`
+- New headless GPU benchmark:
+  - `120 frames in 4.130 sec = 29.1 FPS`
+  - `CPU+SPC: 3991 ms (97%), PPU: 58 ms (1%), Present: 76 ms (2%)`
+- A fresh 5-second GUI smoke run of `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --rom mario.sfc` again produced no captured runtime/shader errors.
+
+## 2026-03-10: Performance Pass — Benchmark Isolation + PPU Hot-Path Cleanup
+
+### Findings
+- The CLI `--benchmark` path was still mounting the normal SwiftUI app scene, which meant `ContentView.onAppear` loaded a default ROM and auto-started a second emulator thread while the benchmark core was running. That made the earlier benchmark numbers noisier than they looked.
+- The remaining renderer hotspot is still the CPU-side PPU path, especially:
+  - per-pixel CGRAM conversion,
+  - per-pixel bitplane extraction for 2bpp/4bpp/8bpp tiles and sprites,
+  - and byte-at-a-time framebuffer writes.
+- The live app was also doing avoidable debug work during normal play:
+  - auto-starting the debug server every run,
+  - and copying full VRAM/CGRAM/OAM snapshots every 10 frames even when the debug sidebar was closed.
+
+### Changes
+- Benchmark isolation:
+  - benchmark mode now suppresses the normal `ContentView` scene so the CLI benchmark runs by itself,
+  - and the app no longer activates the normal window path during `--benchmark`.
+- Debug/trace overhead:
+  - CPU write capture now only records when explicitly enabled for debug-server use,
+  - unconditional DSP `KON` console logging is now gated behind `EmulatorCore.debugLogging`,
+  - and the normal app run path no longer auto-starts the debug server.
+- PPU hot-path work:
+  - added a cached CGRAM `UInt32` color table updated on `CGRAM` writes,
+  - added a precomputed 16-bit bitplane-pair decode table so tile/sprite rows no longer rebuild 2bpp values bit-by-bit for every pixel,
+  - switched framebuffers/subscreen buffers to raw 32-bit pixel storage while preserving byte access for color math and upload,
+  - reduced sprite scanline-cache work to only the visible scanline ranges for each sprite,
+  - and added a fast path that skips color-window checks when color windows are disabled.
+- Live debug UI overhead:
+  - the emulator now only publishes debug snapshots when the debug sidebar is actually open.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- Clean isolated benchmark:
+  - `120 frames in 9.962 sec = 12.0 FPS (0.2x realtime)`
+  - `CPU+SPC: 4176 ms (42%), PPU: 5782 ms (58%)`
+
 ## 2026-03-10: Overworld Ghosting + Audio Pops Follow-up
 
 ### Findings
@@ -476,3 +619,66 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
 - Add an input settings sheet to the toolbar.
 - Show connected controllers and profile support.
 - Allow rebinding one keyboard key and one gamepad control per SNES button, with defaults and clear/reset actions.
+
+## 2026-03-10: Latency Reduction Pass
+
+### Problem
+- Input still felt delayed because the emulator only uploaded the framebuffer after the entire frame, including VBlank, finished.
+- The `MTKView` was rendering on its own cadence instead of right after a new emulator frame became available.
+- Frame pacing used `usleep`, which can oversleep and miss the next display refresh.
+
+### Changes
+- Upload the completed framebuffer immediately after the last visible scanline instead of waiting through the rest of VBlank.
+- Switch the Metal view to on-demand draws and request a draw as soon as the emulator uploads a new frame.
+- Configure the underlying `CAMetalLayer` for lower queue depth and non-transaction presentation.
+- Replace `usleep` pacing with `mach_wait_until` plus a short final spin for tighter frame delivery.
+
+## 2026-03-10: Configurable 1-Frame Run-Ahead
+
+### Goal
+- Reduce end-to-end input latency further without changing normal frame pacing.
+- Keep the feature optional because it trades CPU time for lower latency and does not make animation smoother by itself.
+
+### Changes
+- Extended save-state coverage for per-frame speculative execution:
+  - PPU latch/fixed-color state
+  - APU DSP timing accumulators
+  - DSP envelope/echo/latch internals
+  - joypad auto-read and manual shift state
+- Reused that save-state path inside the core emulation loop for a configurable 0/1-frame run-ahead mode:
+  - run one real frame with audio
+  - snapshot post-frame machine state
+  - run one speculative frame with audio output suppressed
+  - present the speculative frame and restore to the post-real-frame state
+- Added a persisted toolbar latency menu with `Off` and `1 Frame` options.
+- Added a `--run-ahead 1` CLI override for app launches so the path can be smoke-tested directly.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- GUI smoke: `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --run-ahead 1 --rom mario.sfc`
+- Baseline benchmark with run-ahead off remained stable at `120 frames in 9.733 sec = 12.3 FPS`
+
+## 2026-03-10: Display-Linked Pacing + Audio Drift Control
+
+### Problem
+- Throughput benchmarks were not matching subjective smoothness.
+- The emulator was still pacing itself from a software timer and manually posting `draw()` requests to the main queue, which can introduce jitter even when average emulation throughput is high.
+- Audio output was buffered independently, with no feedback loop to keep long-term emulation timing aligned to the real audio device clock.
+
+### Changes
+- Switched the live Metal view to display-linked presentation instead of manual per-frame `draw()` requests:
+  - `MTKView` now runs while emulation is active and targets the screen refresh rate.
+  - the renderer presents the latest completed frame on each display refresh
+  - repeated refreshes no longer recompute the GPU PPU output unless a new emulated frame arrived
+- Added a small audio-buffer-based drift correction in the emulation pacing loop so frame timing is nudged by real audio queue occupancy instead of only a fixed 60.0988 Hz software target.
+- Added pacing instrumentation to the debug sidebar:
+  - average/worst display interval
+  - average/worst frame age at presentation
+  - produced vs presented frame counts
+  - repeated and dropped presents
+  - audio buffer depth, underruns/overruns, and current timing correction
+- Changed persisted run-ahead default to `1 Frame` when the setting has never been stored before, without overriding explicit user choices.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build`
+- 5-second GUI smoke run of `mario.sfc` completed with no captured runtime output

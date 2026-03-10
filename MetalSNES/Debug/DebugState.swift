@@ -43,6 +43,18 @@ final class DebugState: ObservableObject {
     @Published var ppuOBJSEL: UInt8 = 0
     @Published var ppuINIDISP: UInt8 = 0
     @Published var ppuOAMSnapshot: [UInt8] = []
+    @Published var pacingProducedFrames: UInt64 = 0
+    @Published var pacingPresentedFrames: UInt64 = 0
+    @Published var pacingRepeatedFrames: UInt64 = 0
+    @Published var pacingDroppedFrames: UInt64 = 0
+    @Published var pacingAverageDisplayIntervalMs: Double = 0
+    @Published var pacingWorstDisplayIntervalMs: Double = 0
+    @Published var pacingAverageFrameAgeMs: Double = 0
+    @Published var pacingWorstFrameAgeMs: Double = 0
+    @Published var pacingAudioBufferedSamples: Int = 0
+    @Published var pacingAudioUnderruns: UInt64 = 0
+    @Published var pacingAudioOverruns: UInt64 = 0
+    @Published var pacingAudioCorrectionMs: Double = 0
 
     var flagsString: String {
         var s = ""

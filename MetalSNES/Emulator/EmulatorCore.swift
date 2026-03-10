@@ -9,10 +9,16 @@ final class EmulatorCore {
     var renderer: MetalRenderer?
     var debugState: DebugState?
     var debugServer: DebugServer?
+    var runAheadFrames: Int = 0 {
+        didSet { runAheadFrames = min(max(runAheadFrames, 0), 1) }
+    }
 
     private let _running = OSAllocatedUnfairLock(initialState: false)
     private var frameCount: UInt64 = 0
     private var _diagRequested = OSAllocatedUnfairLock(initialState: false)
+    private let _debugSnapshotsEnabled = OSAllocatedUnfairLock(initialState: false)
+    private let runAheadCodec = SaveState()
+    private var audioPacingCorrectionNs: Double = 0
 
     /// Debug pause: when > 0, emulation loop spins (no frames) and decrements.
     var _pauseFrames = OSAllocatedUnfairLock(initialState: 0)
@@ -25,6 +31,11 @@ final class EmulatorCore {
     var isRunning: Bool {
         get { _running.withLock { $0 } }
         set { _running.withLock { $0 = newValue } }
+    }
+
+    var debugSnapshotsEnabled: Bool {
+        get { _debugSnapshotsEnabled.withLock { $0 } }
+        set { _debugSnapshotsEnabled.withLock { $0 = newValue } }
     }
 
     init(cartridge: Cartridge) {
@@ -40,6 +51,7 @@ final class EmulatorCore {
 
     /// Start the HTTP debug server on port 8765 for real-time SPC/DSP inspection.
     func startDebugServer() {
+        bus.captureCPUWriteLog = true
         let server = DebugServer()
         server.emulator = self
         server.start()
@@ -61,7 +73,7 @@ final class EmulatorCore {
                 continue
             }
 
-            runOneFrame()
+            runHostFrame()
             frameCount += 1
 
             if EmulatorCore.debugLogging {
@@ -113,45 +125,38 @@ final class EmulatorCore {
             }
 
             // Frame pacing (drift-free: advance target by fixed interval)
+            updateAudioPacingCorrection()
             let now = mach_absolute_time()
-            let target = lastFrameTime + Timing.targetFrameTimeAbsolute
+            let target = lastFrameTime + adjustedFrameIntervalAbsolute()
             if now < target {
-                let sleepMach = target - now
-                let sleepNs = Timing.machAbsoluteToNanoseconds(sleepMach)
-                usleep(UInt32(sleepNs) / 1000)
+                Timing.waitUntil(target)
             }
-            lastFrameTime += Timing.targetFrameTimeAbsolute
+            lastFrameTime = target
             // If running very late (>2x target), reset to avoid spiral
-            if mach_absolute_time() > lastFrameTime + Timing.targetFrameTimeAbsolute * 2 {
+            let adjustedFrameInterval = adjustedFrameIntervalAbsolute()
+            if mach_absolute_time() > lastFrameTime + adjustedFrameInterval * 2 {
                 lastFrameTime = mach_absolute_time()
             }
 
             // Update debug state periodically
-            if frameCount % 10 == 0 {
+            if debugSnapshotsEnabled && frameCount % 10 == 0 {
                 updateDebugState()
             }
         }
     }
 
     func runOneFrame() {
-        for scanline in 0..<SNESConstants.scanlinesPerFrame {
-            runScanline(scanline)
-        }
-
-        // Upload framebuffer to Metal
-        bus.ppu.swapBuffers()
-        if let renderer = renderer, let ptr = bus.ppu.frontBuffer.baseAddress {
-            renderer.uploadFramebuffer(ptr)
-        }
+        runFrame(presentFrame: true, outputAudio: true, emitDiagnostics: true)
     }
 
     /// Run a fixed number of frames with no frame pacing and report FPS.
     func benchmark(frames: Int) {
         var cpuTime: UInt64 = 0
         var ppuTime: UInt64 = 0
-        var spcTime: UInt64 = 0
+        var presentTime: UInt64 = 0
         let start = mach_absolute_time()
         for _ in 0..<frames {
+            bus.ppu.gpuRenderingAvailable = renderer?.supportsPPURendering ?? false
             for scanline in 0..<SNESConstants.scanlinesPerFrame {
                 if scanline == 0 {
                     bus.exitVBlank()
@@ -188,11 +193,16 @@ final class EmulatorCore {
                 }
                 ppuTime += mach_absolute_time() - ppuStart
 
+                if scanline == SNESConstants.visibleScanlines - 1 {
+                    let presentStart = mach_absolute_time()
+                    presentCompletedFrame()
+                    presentTime += mach_absolute_time() - presentStart
+                }
+
                 if scanline == SNESConstants.vBlankStart {
                     bus.enterVBlank()
                 }
             }
-            bus.ppu.swapBuffers()
         }
         let elapsed = mach_absolute_time() - start
         let elapsedNs = Timing.machAbsoluteToNanoseconds(elapsed)
@@ -200,20 +210,69 @@ final class EmulatorCore {
         let fps = Double(frames) / elapsedSec
         let cpuMs = Double(Timing.machAbsoluteToNanoseconds(cpuTime)) / 1_000_000
         let ppuMs = Double(Timing.machAbsoluteToNanoseconds(ppuTime)) / 1_000_000
-        let spcMs = Double(Timing.machAbsoluteToNanoseconds(spcTime)) / 1_000_000
+        let presentMs = Double(Timing.machAbsoluteToNanoseconds(presentTime)) / 1_000_000
         print(String(format: "Benchmark: %d frames in %.3f sec = %.1f FPS (%.1fx realtime)",
                       frames, elapsedSec, fps, fps / 60.0))
-        print(String(format: "  CPU+SPC: %.0f ms (%.0f%%), PPU: %.0f ms (%.0f%%), SPC: %.0f ms (%.0f%%)",
+        print(String(format: "  CPU+SPC: %.0f ms (%.0f%%), PPU: %.0f ms (%.0f%%), Present: %.0f ms (%.0f%%)",
                       cpuMs, cpuMs / (elapsedSec * 1000) * 100,
                       ppuMs, ppuMs / (elapsedSec * 1000) * 100,
-                      spcMs, spcMs / (elapsedSec * 1000) * 100))
+                      presentMs, presentMs / (elapsedSec * 1000) * 100))
         fflush(stdout)
     }
 
     /// Tracks whether the H/V timer IRQ already fired on the current scanline.
     private var irqFiredThisScanline = false
 
-    private func runScanline(_ scanline: Int) {
+    private func updateAudioPacingCorrection() {
+        guard frameCount >= 30 else {
+            audioPacingCorrectionNs = 0
+            return
+        }
+        let bufferedSamples = Double(bus.apu.audioOutput.bufferedSamples)
+        let targetBufferedSamples = Double(bus.apu.audioOutput.pacingTargetBufferedSamples)
+        let errorSamples = bufferedSamples - targetBufferedSamples
+        let desiredCorrectionNs = errorSamples * 400.0
+        audioPacingCorrectionNs += (desiredCorrectionNs - audioPacingCorrectionNs) * 0.1
+        audioPacingCorrectionNs = min(max(audioPacingCorrectionNs, -500_000), 500_000)
+    }
+
+    private func adjustedFrameIntervalAbsolute() -> UInt64 {
+        let baseNs = Int64(Timing.targetFrameTimeNanoseconds)
+        let correctedNs = max(1, baseNs + Int64(audioPacingCorrectionNs.rounded()))
+        return Timing.nanosecondsToMachAbsolute(UInt64(correctedNs))
+    }
+
+    private func runHostFrame() {
+        guard runAheadFrames > 0 else {
+            runFrame(presentFrame: true, outputAudio: true, emitDiagnostics: true)
+            return
+        }
+
+        runFrame(presentFrame: false, outputAudio: true, emitDiagnostics: true)
+        let snapshot = runAheadCodec.save(core: self)
+        runFrame(presentFrame: true, outputAudio: false, emitDiagnostics: false)
+
+        do {
+            try runAheadCodec.restore(from: snapshot, core: self)
+        } catch {
+            runAheadFrames = 0
+            print("Run-ahead disabled after save-state restore failure: \(error.localizedDescription)")
+            fflush(stdout)
+        }
+    }
+
+    private func runFrame(presentFrame: Bool, outputAudio: Bool, emitDiagnostics: Bool) {
+        bus.ppu.gpuRenderingAvailable = renderer?.supportsPPURendering ?? false
+        for scanline in 0..<SNESConstants.scanlinesPerFrame {
+            runScanline(scanline, outputAudio: outputAudio, emitDiagnostics: emitDiagnostics)
+
+            if presentFrame, scanline == SNESConstants.visibleScanlines - 1 {
+                presentCompletedFrame()
+            }
+        }
+    }
+
+    private func runScanline(_ scanline: Int, outputAudio: Bool = true, emitDiagnostics: Bool = true) {
         if scanline == 0 {
             bus.exitVBlank()
 
@@ -245,9 +304,9 @@ final class EmulatorCore {
         bus.hvbjoy &= ~0x40
 
         // On-demand freeze diagnostic (triggered by Diagnose button)
-        let tracing = _diagRequested.withLock { val -> Bool in
+        let tracing = emitDiagnostics ? _diagRequested.withLock { val -> Bool in
             if val { val = false; return true }; return false
-        }
+        } : false
         var traceBuffer: [(UInt32, UInt8)] = []
 
         while cyclesRemaining > 0 {
@@ -271,7 +330,7 @@ final class EmulatorCore {
             while spcCycleDebt >= 1.0 {
                 let spcCycles = spc.step()
                 spc.tickTimers(cpuCycles: spcCycles)
-                bus.apu.runSPCCycles(spcCycles)
+                bus.apu.runSPCCycles(spcCycles, outputAudio: outputAudio)
                 spcCycleDebt -= Double(spcCycles)
             }
 
@@ -307,7 +366,9 @@ final class EmulatorCore {
         }
 
         // Debug logging for this scanline (DSP samples now generated inline via runSPCCycles)
-        bus.apu.tickScanline()
+        if emitDiagnostics {
+            bus.apu.tickScanline()
+        }
 
         // Render visible scanlines
         if scanline < SNESConstants.visibleScanlines {
@@ -361,6 +422,21 @@ final class EmulatorCore {
         _ = cpu.step()
     }
 
+    private func presentCompletedFrame() {
+        if let renderer = renderer {
+            if bus.ppu.usesGPURenderingThisFrame {
+                renderer.present(ppu: bus.ppu)
+            } else {
+                bus.ppu.swapBuffers()
+                if let ptr = bus.ppu.frontBuffer.baseAddress {
+                    renderer.uploadFramebuffer(ptr)
+                }
+            }
+        } else if !bus.ppu.usesGPURenderingThisFrame {
+            bus.ppu.swapBuffers()
+        }
+    }
+
     func stop() {
         isRunning = false
         bus.apu.stopAudio()
@@ -390,6 +466,11 @@ final class EmulatorCore {
 
         let obj = bus.ppu.objsel
         let sprOverride = debugState.spriteOverrideEnabled
+        let pacingSnapshot = renderer?.pacingSnapshot()
+        let audioBufferedSamples = bus.apu.audioOutput.bufferedSamples
+        let audioUnderruns = bus.apu.audioOutput.underrunEvents
+        let audioOverruns = bus.apu.audioOutput.overrunEvents
+        let audioCorrectionMs = audioPacingCorrectionNs / 1_000_000
 
         // Snapshot VRAM, CGRAM, OAM and PPU registers for tile viewer
         let vramCopy = bus.ppu.vram
@@ -437,6 +518,18 @@ final class EmulatorCore {
             debugState.ppuOBJSEL = obj
             debugState.ppuINIDISP = inidisp
             debugState.ppuOAMSnapshot = oamCopy
+            debugState.pacingProducedFrames = pacingSnapshot?.producedFrames ?? 0
+            debugState.pacingPresentedFrames = pacingSnapshot?.presentedFrames ?? 0
+            debugState.pacingRepeatedFrames = pacingSnapshot?.repeatedFrames ?? 0
+            debugState.pacingDroppedFrames = pacingSnapshot?.droppedFrames ?? 0
+            debugState.pacingAverageDisplayIntervalMs = pacingSnapshot?.averageDisplayIntervalMs ?? 0
+            debugState.pacingWorstDisplayIntervalMs = pacingSnapshot?.worstDisplayIntervalMs ?? 0
+            debugState.pacingAverageFrameAgeMs = pacingSnapshot?.averageFrameAgeMs ?? 0
+            debugState.pacingWorstFrameAgeMs = pacingSnapshot?.worstFrameAgeMs ?? 0
+            debugState.pacingAudioBufferedSamples = audioBufferedSamples
+            debugState.pacingAudioUnderruns = audioUnderruns
+            debugState.pacingAudioOverruns = audioOverruns
+            debugState.pacingAudioCorrectionMs = audioCorrectionMs
         }
     }
 }

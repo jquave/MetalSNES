@@ -21,6 +21,23 @@ private func CLAMP16(_ v: inout Int) {
 }
 
 final class DSP: DSPInterface {
+    struct VoiceSnapshot {
+        var hiddenEnv = 0
+        var konDelay = 0
+        var output = 0
+    }
+
+    struct Snapshot {
+        var globalCounter = 0
+        var noiseLevel: Int16 = 0x4000
+        var echoPos = 0
+        var echoHistL = [Int16](repeating: 0, count: 8)
+        var echoHistR = [Int16](repeating: 0, count: 8)
+        var echoHistPos = 0
+        var konLatch: UInt8 = 0
+        var koffLatch: UInt8 = 0
+        var voices = [VoiceSnapshot](repeating: VoiceSnapshot(), count: 8)
+    }
 
     // MARK: Registers
 
@@ -179,14 +196,59 @@ final class DSP: DSPInterface {
     var diagNonZeroSamples: UInt64 = 0
     var diagKonCount: UInt64 = 0
     var diagLastFLG: UInt8 = 0xFF
-    static let diagFile: FileHandle? = {
+    private static var diagFile: FileHandle?
+
+    private static func getDiagFile() -> FileHandle? {
+        if let diagFile {
+            return diagFile
+        }
         let path = "/tmp/dsp_diag.log"
         FileManager.default.createFile(atPath: path, contents: nil)
-        return FileHandle(forWritingAtPath: path)
-    }()
+        diagFile = FileHandle(forWritingAtPath: path)
+        return diagFile
+    }
+
     func diagLog(_ msg: String) {
-        if let fh = DSP.diagFile {
+        guard EmulatorCore.debugLogging else { return }
+        if let fh = DSP.getDiagFile() {
             fh.write((msg + "\n").data(using: .utf8)!)
+        }
+    }
+
+    func captureSnapshot() -> Snapshot {
+        Snapshot(
+            globalCounter: globalCounter,
+            noiseLevel: noiseLevel,
+            echoPos: echoPos,
+            echoHistL: echoHistL,
+            echoHistR: echoHistR,
+            echoHistPos: echoHistPos,
+            konLatch: konLatch,
+            koffLatch: koffLatch,
+            voices: voices.map { voice in
+                VoiceSnapshot(
+                    hiddenEnv: voice.hiddenEnv,
+                    konDelay: voice.konDelay,
+                    output: voice.output
+                )
+            }
+        )
+    }
+
+    func restoreSnapshot(_ snapshot: Snapshot) {
+        globalCounter = snapshot.globalCounter
+        noiseLevel = snapshot.noiseLevel
+        echoPos = snapshot.echoPos
+        echoHistL = snapshot.echoHistL
+        echoHistR = snapshot.echoHistR
+        echoHistPos = snapshot.echoHistPos
+        konLatch = snapshot.konLatch
+        koffLatch = snapshot.koffLatch
+
+        for index in 0..<min(voices.count, snapshot.voices.count) {
+            voices[index].hiddenEnv = snapshot.voices[index].hiddenEnv
+            voices[index].konDelay = snapshot.voices[index].konDelay
+            voices[index].output = snapshot.voices[index].output
         }
     }
 
@@ -202,7 +264,7 @@ final class DSP: DSPInterface {
         regs[r] = value
 
         // Log DSP register writes: always log certain registers, throttle others
-        if diagSampleCount < 200000 {
+        if EmulatorCore.debugLogging && diagSampleCount < 200000 {
             // Always log KON, KOFF, FLG, and voice setup registers (vol, pitch, srcn, adsr)
             let isVoiceSetup = (r & 0x0F) <= 0x07 && r < 0x80  // voice vol/pitch/srcn/adsr/gain
             if r == 0x4C || r == 0x5C || r == 0x6C || isVoiceSetup {
@@ -213,16 +275,19 @@ final class DSP: DSPInterface {
         switch r {
         case 0x4C: // KON — key on
             konLatch = value
-            if diagSampleCount < 200000 {
+            if EmulatorCore.debugLogging && diagSampleCount < 200000 {
                 diagLog(String(format: "[DSP-WRITE] KON=$%02X at sample %llu", value, diagSampleCount))
             }
             // Trigger SPC trace during music init phase
-            if diagSampleCount > 108000 && diagSampleCount < 115000 && !spcTraceTriggered {
+            if EmulatorCore.debugLogging &&
+                diagSampleCount > 108000 &&
+                diagSampleCount < 115000 &&
+                !spcTraceTriggered {
                 spcTraceTriggered = true
                 triggerSPCTrace?()
                 diagLog("[DSP] SPC trace triggered at sample \(diagSampleCount)")
             }
-            if value != 0 && konLogCount < 8 {
+            if EmulatorCore.debugLogging && value != 0 && konLogCount < 8 {
                 konLogCount += 1
                 let mvolL = Int8(bitPattern: regs[0x0C])
                 let mvolR = Int8(bitPattern: regs[0x1C])
@@ -271,7 +336,11 @@ final class DSP: DSPInterface {
             koffLatch = value
         case 0x6C: // FLG
             // Trigger SPC trace when FLG changes from $60 to $20 (music init completing)
-            if value == 0x20 && regs[0x6C] == 0x60 && !spcTraceTriggered && diagSampleCount > 100000 {
+            if EmulatorCore.debugLogging &&
+                value == 0x20 &&
+                regs[0x6C] == 0x60 &&
+                !spcTraceTriggered &&
+                diagSampleCount > 100000 {
                 spcTraceTriggered = true
                 triggerSPCTrace?()
                 diagLog("[DSP] SPC trace triggered on FLG $60→$20 at sample \(diagSampleCount)")
@@ -469,7 +538,7 @@ final class DSP: DSPInterface {
         diagSampleCount += 1
         if outL != 0 || outR != 0 { diagNonZeroSamples += 1 }
         let flg = regs[0x6C]
-        if diagSampleCount % 32000 == 0 || flg != diagLastFLG {
+        if EmulatorCore.debugLogging && (diagSampleCount % 32000 == 0 || flg != diagLastFLG) {
             if diagSampleCount % 32000 == 0 {
                 let activeVoices = (0..<8).filter { voices[$0].keyedOn }.count
                 var voiceInfo = ""
@@ -489,6 +558,8 @@ final class DSP: DSPInterface {
                              diagLastFLG, flg, (flg >> 6) & 1, (flg >> 5) & 1, diagSampleCount))
                 diagLastFLG = flg
             }
+        } else {
+            diagLastFLG = flg
         }
 
         return (Int16(outL), Int16(outR))
@@ -514,9 +585,11 @@ final class DSP: DSPInterface {
                 let lo = UInt16(readRAM?(entryAddr) ?? 0)
                 let hi = UInt16(readRAM?(entryAddr &+ 1) ?? 0)
                 let brrStart = (hi << 8) | lo
-                let pitch = UInt16(regs[v * 0x10 + 2]) | (UInt16(regs[v * 0x10 + 3] & 0x3F) << 8)
-                diagLog(String(format: "[DSP-KON] v%d srcn=$%02X brr@$%04X pitch=$%04X adsr=%02X/%02X FLG=$%02X sample#%llu",
-                               v, srcn, brrStart, pitch, regs[v * 0x10 + 5], regs[v * 0x10 + 6], regs[0x6C], diagSampleCount))
+                if EmulatorCore.debugLogging {
+                    let pitch = UInt16(regs[v * 0x10 + 2]) | (UInt16(regs[v * 0x10 + 3] & 0x3F) << 8)
+                    diagLog(String(format: "[DSP-KON] v%d srcn=$%02X brr@$%04X pitch=$%04X adsr=%02X/%02X FLG=$%02X sample#%llu",
+                                   v, srcn, brrStart, pitch, regs[v * 0x10 + 5], regs[v * 0x10 + 6], regs[0x6C], diagSampleCount))
+                }
                 voices[v].keyedOn = true
                 voices[v].envMode = .attack
                 voices[v].envLevel = 0
