@@ -1,3 +1,9 @@
+# MetalSNES
+
+A from-scratch implementation of the SNES vibe coded with Codex and Claude Code (with lots of hand holding)
+
+Current status is that it can run most things given to it with some transparency issues, pending work on the PPU and APU. Sound is universally an ongoing problem, but partially works currently.
+
 # MetalSNES — Code Flow & Architecture
 
 ## Top-Level File Map
