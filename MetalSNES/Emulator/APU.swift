@@ -6,16 +6,17 @@ final class APU {
     let audioOutput: AudioOutput
 
     // Cycle tracking for running SPC700 in sync with main CPU
-    // SPC700 runs at ~1.024 MHz (24.576 MHz / 24)
-    // 1024000 / 60.0988 / 262 ≈ 65.1 cycles per scanline
-    static let spcCyclesPerScanline = 65
+    // The S-SMP core is clocked at ~2.048 MHz (24.576 MHz / 12).
+    // SPC700.step() returns those raw SMP clock counts (NOP = 2, etc),
+    // so the scanline budget must use the full ~2.048 MHz domain.
+    static let spcCyclesPerScanline: Double = 2048000.0 / 60.0988 / 262.0
 
     // DSP generates samples at 32 kHz = 32000/60.0988/262 ≈ 2.035 samples/scanline
     private var dspSampleAccumulator: Double = 0
     static let dspSamplesPerScanline: Double = 32000.0 / 60.0988 / 262.0
 
-    // Fine-grained DSP interleaving: 1 DSP sample every ~32 SPC cycles
-    static let spcCyclesPerDSPSample: Double = 1024000.0 / 32000.0  // ~32.0
+    // Fine-grained DSP interleaving: 1 DSP sample every 64 SMP clocks
+    static let spcCyclesPerDSPSample: Double = 2048000.0 / 32000.0  // 64.0
     var dspCycleAccumulator: Double = 0
 
     // Debug

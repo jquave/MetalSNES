@@ -2,7 +2,7 @@
 
 A from-scratch implementation of the SNES vibe coded with Codex and Claude Code (with lots of hand holding)
 
-Current status is that it can run most things given to it with some transparency issues, pending work on the PPU and APU. Sound is universally an ongoing problem, but partially works currently.
+Current status: LoROM and HiROM boot, save states and the debug server work, and both the PPU and APU are real implementations rather than stubs. PPU accuracy gaps remain, and audio is functional but still under active accuracy work.
 
 # MetalSNES — Code Flow & Architecture
 
@@ -23,13 +23,13 @@ MetalSNES/
 ├── Emulator/
 │   ├── EmulatorCore.swift         Frame/scanline loop, H/V IRQ, HDMA integration
 │   ├── Bus.swift                  24-bit address decode, register routing, SRAM persistence
-│   ├── PPU.swift                  Scanline renderer, priority system, Mode 0/1, MPY regs
-│   ├── APU.swift                  APU orchestration: SPC700, DSP, audio output, port bridge
+│   ├── PPU.swift                  Scanline renderer, priority system, Modes 0/1/3/7, color math, MPY regs
+│   ├── APU.swift                  APU orchestration: SPC700, DSP, audio output, port bridge, timing
 │   ├── SPC700.swift               SPC700 CPU, timers, boot ROM, DSP/port I/O
 │   ├── DSP.swift                  S-DSP voices, BRR decode, ADSR/GAIN, echo/FIR
 │   ├── AudioOutput.swift          AVAudioEngine source node + ring buffer
 │   ├── DMA.swift                  8-channel general DMA + HDMA
-│   ├── Cartridge.swift            LoROM header parsing, address translation
+│   ├── Cartridge.swift            LoROM/HiROM header parsing, address translation
 │   ├── Joypad.swift               Thread-safe keyboard→button mapping, strobe/auto-read
 │   ├── DebugServer.swift          HTTP debug endpoints for CPU/SPC/DSP inspection
 │   ├── SaveState.swift            Full emulator save/load state serialization
@@ -102,6 +102,12 @@ runScanline(y):
   │   │  while cyclesRemaining > 0:
   │   │    cycles = cpu.step()
   │   │    cyclesRemaining -= cycles
+  │   │    spcCycleDebt += cycles * spcRatio
+  │   │    while spcCycleDebt >= 1:
+  │   │      spcCycles = spc.step()
+  │   │      spc.tickTimers(cpuCycles: spcCycles)
+  │   │      bus.apu.runSPCCycles(spcCycles)
+  │   │      spcCycleDebt -= spcCycles
   │   │
   │   └─ cpu.step():
   │       ├─ forward bus.nmiPending → regs.nmiPending
@@ -111,12 +117,11 @@ runScanline(y):
   │           ├─ fetch opcode at PBR:PC
   │           └─ dispatch_table[opcode](regs, read, write, ctx)
   │
-  ├─ checkTimerIRQ(scanline):
-  │     ├─ NMITIMEN bits 4-5 → irqMode (0=off, 1=H, 2=V, 3=HV)
-  │     ├─ H-IRQ: fires once per scanline (simplified)
-  │     ├─ V-IRQ: fires when scanline == VTIME
-  │     ├─ HV-IRQ: fires when scanline == VTIME (H simplified)
-  │     └─ sets bus.timeup = 0x80, cpu.regs.irqPending = true
+  │
+  ├─ H-IRQ checks happen inside the CPU loop as hDot advances
+  │     └─ checkTimerIRQ(scanline:hDot:) sets TIMEUP + cpu.regs.irqPending
+  │
+  ├─ bus.apu.tickScanline()                 ← SPC PC/timer/DSP diagnostics
   │
   ├─ if y < 224:
   │     ├─ ppu.renderScanline(y)
@@ -231,17 +236,18 @@ ppu.renderScanline(y):
   │     BG3p0 → OBJp0 → BG3p1* → OBJp1 → BG2p0 → BG1p0 →
   │     OBJp2 → BG2p1 → BG1p1 → OBJp3 → (BG3p1 at top if BGMODE bit 3)
   │
-  │   Modes 2-6 (simplified):
+  │   Mode 3:
+  │     BG2p0 → BG1p0 → OBJp0 → OBJp1 → BG2p1 → BG1p1 → OBJp2 → OBJp3
+  │
+  │   Modes 2/4/5/6 (simplified):
   │     BG1p0 → BG2p0 → OBJp0 → OBJp1 → BG1p1 → BG2p1 → OBJp2 → OBJp3
   │
-  │   Mode 7: renderMode7() stub + all sprites
+  │   Mode 7: affine renderMode7() + all sprites
   │
-  │   BG render functions accept tilePriority filter (0 or 1):
-  │   ├─ extract bit 13 from tilemap entry → skip non-matching tiles
-  │   └─ supports both 8x8 and 16x16 tile sizes (2bpp and 4bpp)
+  │   BG renderers derive z-order directly from tilemap bit 13
+  │   and support both 8x8 and 16x16 tile sizes (2bpp and 4bpp)
   │
-  │   Sprite render accepts spritePriority filter (0-3):
-  │   └─ extract bits 4-5 from OAM attr → skip non-matching sprites
+  │   Sprite renderer maps OAM priority bits 4-5 into per-mode z-orders
   │
   │   Per-BG rendering (tile-first loop):
   │   ├─ compute tilemap base, chr base (nibble << 13), scroll offsets
@@ -354,7 +360,7 @@ EmulatorViewModel (SwiftUI @StateObject)
   │     │     ├── .cartridge: Cartridge (+ romURL)
   │     │     ├── .wram: UnsafeMutableBufferPointer (128KB)
   │     │     └── .sram: UnsafeMutableBufferPointer (up to 32KB, persisted)
-  │     ├── .cpu: CPU (weak ref to Bus, C dispatch via Unmanaged<Bus>)
+  │     ├── .cpu: CPU (unowned Bus ref, C dispatch via Unmanaged<CPU>)
   │     └── .renderer: MetalRenderer? (set externally)
   ├── .renderer: MetalRenderer? (NSLock on texture)
   ├── .romURL: URL? (for SRAM path derivation)

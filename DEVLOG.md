@@ -1,5 +1,70 @@
 # MetalSNES Development Log
 
+## 2026-03-10: Markdown Audit — Repo Docs Reconciled With Current Code
+
+### Findings
+- Re-read every Markdown file in the repo (`README.md`, `ISSUES.md`, `AUDIO_DEBUG.md`, `DEVLOG.md`, `AGENTS.md`, `CLAUDE.md`) against the current tree.
+- The stale items were concentrated in the audio/debug docs and the architecture overview:
+  - README still described `renderMode7()` as a stub and had stale ownership notes for `CPU`.
+  - ISSUES still claimed color math/sub-screen blending were missing, even though `PPU.swift` now renders a sub-screen path and applies additive/subtractive color math.
+  - AUDIO_DEBUG still had an internal contradiction about the debug server being "off" while also documenting that the current app auto-starts it, and it still referenced the older 32-cycle DSP interleave.
+  - DEVLOG still contained an older BG chr-base conclusion that no longer matches the current renderer or the rest of the repo docs.
+
+### Changes
+- Updated `README.md` to match the current PPU/APU feature set and current ownership/timing flow.
+- Updated `ISSUES.md` so the remaining issue list reflects the current code, especially around audio timing and color math.
+- Updated `AUDIO_DEBUG.md` to match current debug-server startup behavior, current endpoint coverage, and current audio fixes.
+- Marked the older DEVLOG chr-base conclusion as a false lead instead of leaving it as an unqualified hardware claim.
+
+## 2026-03-10: APU Timing Fix — SPC Was Scheduled at Half Clock Rate
+
+### Findings
+- The new symptom set after the SPC instruction fixes was: background music playing at roughly half speed and sound effects sounding wrong rather than simply silent.
+- The root cause was in the APU scheduler, not the SMW script path. `SPC700.step()` returns raw S-SMP clock counts (`NOP = 2`, etc), but `APU.swift` was budgeting the SPC as if it ran at ~1.024 MHz and was generating DSP samples every 32 SPC clocks.
+- The actual S-SMP clock domain is ~2.048 MHz (`24.576 MHz / 12`), and the DSP sample cadence is 64 SMP clocks per 32 kHz output sample.
+- That meant the DSP audio stream itself was being produced at 32 kHz, but the SPC program/timer side was only advancing at about half the intended rate relative to that stream. That matches the user-facing symptom: music tempo roughly halved and SFX behavior sounding strange rather than fully broken.
+
+### Changes
+- Updated the APU SPC scanline budget to use the full ~2.048 MHz S-SMP clock domain.
+- Updated DSP interleave cadence from 32 to 64 SPC clocks per generated sample.
+- Kept the existing 32 kHz audio output rate; the fix is the relative SPC-to-DSP timing, not the host output format.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Release -derivedDataPath /tmp/MetalSNESReleaseDerived build CODE_SIGNING_ALLOWED=NO` succeeded after the timing patch.
+
+## 2026-03-10: SPC700 Follow-up — WAIT/STOP Idle Semantics + Trace Fix
+
+### Findings
+- Compared our `SPC700.step()` flow against bsnes `SMP::main()` plus `instructionWait()` / `instructionStop()`.
+- The previous implementation had two separate problems:
+  - `SLEEP` (`$EF`) / `STOP` (`$FF`) rewound `PC`, which does not match bsnes.
+  - once `sleeping/stopped` was set, later `step()` calls returned immediately with no bus read and almost no timing cost.
+- bsnes keeps `PC` advanced after the opcode fetch and, while halted, repeatedly performs a read at the current `PC` plus an idle cycle. That means our old behavior was both control-flow wrong and timing-wrong.
+- The SPC trace logger also had a real tooling bug: the end-of-scope `defer` ran before opcode execution, so the “post” register dump could actually be a pre-execution snapshot.
+
+### Changes
+- `SPC700.step()` now treats `sleeping/stopped` as a halted execution state that performs a read at the already-advanced `PC` and returns a 2-cycle idle step.
+- `SLEEP` / `STOP` no longer rewind `PC`; they just enter the halted state and return the opcode cost for the entry instruction.
+- Reworked the trace path so the trace context is captured before fetch and appended after the opcode switch returns, which makes the logged post-state reflect the actual post-instruction registers.
+
+### Validation
+- `xcodebuild -project /Users/jquave/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Release -derivedDataPath /tmp/MetalSNESReleaseDerived build CODE_SIGNING_ALLOWED=NO` succeeded after the change.
+
+## 2026-03-10: SPC700 Review Follow-up — Remaining Class-Level Bugs
+
+Historical note: the `SLEEP` / `STOP` and trace issues described here were fixed later the same day in the entry above.
+
+### Findings
+- Re-reviewed `MetalSNES/Emulator/SPC700.swift` against the local bsnes SPC700 core after the `POP A/X/Y` flag fix.
+- One additional high-confidence emulation bug remains in the class: `SLEEP` (`$EF`) and `STOP` (`$FF`) currently set `sleeping/stopped`, rewind `PC` by 1, and then `step()` returns early forever while those flags are set.
+- bsnes does not rewind `PC` for these opcodes. It fetches the opcode once, leaves `PC` advanced, and then idles on repeated reads of the current `PC` until the wait/stop condition is released.
+- In our core, that means executing `SLEEP` or `STOP` is currently terminal unless some outside code manually clears the flags, and even if something did clear them later, execution would re-run the wait opcode instead of continuing at the following instruction.
+- Separate tooling bug: the SPC trace block uses a `defer` at end-of-scope, and Swift warns that it executes immediately. That matches the earlier misleading traces where lines for `MOV A,...`, `MUL`, `INC A`, and `POP A` appeared to show stale post-instruction register values.
+
+### Current Conclusion
+- After the `POP` fix, I do not currently see another equally obvious ALU/flag mismatch in `SPC700.swift` from a bsnes cross-check.
+- The next concrete code fix in this class should be `SLEEP`/`STOP` semantics. The trace logger should also be corrected so future SPC investigations are not biased by stale state dumps.
+
 ## 2026-03-10: SMW Audio Fix — SPC700 POP Flags Were Clobbering DSP Pitch Writes
 
 ### Findings
@@ -27,6 +92,8 @@
 - I still cannot literally hear the app from inside the shell, but the emulator state after this fix now matches active SMW song playback far more closely than the pre-fix runs.
 
 ## 2026-03-10: SMW Audio Follow-up — Fresh Boot Still Fails, CPU-Side Lead
+
+Historical note: later `POP A/X/Y` and APU clock-rate fixes changed this conclusion. Keep this section as an investigation snapshot, not the final root cause.
 
 ### Findings
 - Revalidated on a `Release` build, not `Debug`. A clean `mario.sfc` boot still does not produce working SMW music.
@@ -114,7 +181,7 @@ Removed `cpuRef` (strong reference to CPU) from `APU.write()` — it caused a Sw
 3. **ADDW/SUBW half-carry**: H flag was computed on bit 12 boundary instead of high byte with carry/borrow from low byte.
 
 ### Debug Server
-Added HTTP debug server (`DebugServer.swift`) on port 8765 for real-time SPC/DSP inspection via `curl`. See `AUDIO_DEBUG.md` for endpoints and usage. Defaults to off — call `emulatorCore.startDebugServer()` to enable.
+Added HTTP debug server (`DebugServer.swift`) on port 8765 for real-time SPC/DSP inspection via `curl`. See `AUDIO_DEBUG.md` for endpoints and usage. Historical note: this originally required a manual `startDebugServer()` call; the current UI auto-starts it when emulation begins.
 
 ## 2026-03-09: Performance Optimization — 16 FPS → 408 FPS
 
@@ -177,7 +244,7 @@ Added CPU/PPU/SPC timing splits to benchmark. Results showed CPU+SPC = 97% of ti
 - Check if APU transfer protocol is sufficient or if game hangs
 - Test keyboard input on title screen
 
-## 2026-03-09: PPU Diagnostic Tests + Chr Base Address Fix
+## 2026-03-09: PPU Diagnostic Tests + Chr Base Investigation
 
 ### PPU Diagnostic Framework
 - Created `PPUDiagnostic.swift` with 4 progressive unit tests that bypass the CPU:
@@ -195,14 +262,9 @@ Added CPU/PPU/SPC timing splits to benchmark. Results showed CPU+SPC = 97% of ti
 - Standalone `runOneFrame()` calls (used by diagnostic) had `running=false`, executing 0 CPU cycles.
 - Fixed by saving/restoring `running` flag in `runOneFrame()`.
 
-### Bug Fix: Chr base address was 2× too small
-- **Root cause**: BG12NBA/BG34NBA chr base calculation used `nibble << 13` (8KB steps).
-- **Correct**: Each nibble = 8K words = 16KB bytes, so should be `nibble << 14`.
-- DMA evidence: Zelda sets bg12nba=0x22, writes chr data at VRAM word 0x4000 (byte 0x8000).
-  Old code: chr base = 2 << 13 = 0x4000 bytes. Correct: 2 << 14 = 0x8000 bytes.
-- This caused tile graphics to be read from the wrong VRAM location, producing garbled fills
-  inside the ZELDA title screen letters (outlines were correct because tilemap positions were fine).
-- Fixed in both `renderBG4bpp` and `renderBG2bpp`.
+### Historical note: chr base investigation was a false lead
+- This conclusion did not hold up. Later rechecks and the current renderer keep BG chr bases at `nibble << 13` (8KB steps), while sprite name bases remain `<< 14`.
+- The Zelda rendering symptoms observed here were real, but this was not the final explanation for them.
 
 ### Findings from Runtime Dump
 - Zelda title screen: `tm=0x10` (sprites only) — all visible content rendered as sprites
@@ -214,7 +276,7 @@ Added CPU/PPU/SPC timing splits to benchmark. Results showed CPU+SPC = 97% of ti
 ### Current State
 - All 4 PPU unit tests PASS
 - Zelda title screen renders with correct colors for sprites (gold triforce, white text)
-- Chr base fix should improve BG tile rendering once tm enables BGs
+- The BG chr-base theory above was not the final fix; keep the current `<< 13` BG addressing unless later evidence says otherwise.
 - Need to investigate: why does Zelda only enable sprites (`tm=0x10`) and not BGs?
 
 ## 2026-03-09: Sprite Chr Base Address Fix (OBSEL $2101)

@@ -164,7 +164,7 @@ final class EmulatorCore {
                 let cpuStart = mach_absolute_time()
                 var cyclesRemaining = Timing.cpuCyclesPerScanline
                 var spcCycleDebt: Double = 0.0
-                let spcRatio = Double(APU.spcCyclesPerScanline) / Double(Timing.cpuCyclesPerScanline)
+                let spcRatio = APU.spcCyclesPerScanline / Double(Timing.cpuCyclesPerScanline)
                 let spc = bus.apu.spc700
                 while cyclesRemaining > 0 {
                     let cycles = cpu.step()
@@ -238,7 +238,7 @@ final class EmulatorCore {
         var hDot = 0
         let dotsPerCycle = 4
         var spcCycleDebt: Double = 0.0
-        let spcRatio = Double(APU.spcCyclesPerScanline) / Double(Timing.cpuCyclesPerScanline)
+        let spcRatio = APU.spcCyclesPerScanline / Double(Timing.cpuCyclesPerScanline)
         let spc = bus.apu.spc700
 
         // Start of scanline: clear HBlank

@@ -424,9 +424,14 @@ final class SPC700 {
     // MARK: - Step (execute one instruction)
 
     func step() -> Int {
-        if stopped || sleeping { return 1 }
+        if stopped || sleeping {
+            // WAIT/STOP keep the already-advanced PC and repeatedly idle on it.
+            _ = read(pc)
+            return 2
+        }
 
         // Trace: capture instruction before fetch advances PC
+        let traceContext: (instrPC: UInt16, op0: UInt8, op1: UInt8, op2: UInt8, preA: UInt8)?
         if traceEnabled2 && traceCountdown > 0 {
             let instrPC = pc
             traceCountdown -= 1
@@ -435,23 +440,15 @@ final class SPC700 {
             let op0 = ram[Int(instrPC)]
             let op1 = ram[Int((instrPC &+ 1) & 0xFFFF)]
             let op2 = ram[Int((instrPC &+ 2) & 0xFFFF)]
-            defer {
-                if traceLog2.count < 2000 {
-                    traceLog2.append(String(format: "$%04X: %02X %02X %02X  A=$%02X→$%02X X=$%02X Y=$%02X SP=$%02X P=%@%@%@%@",
-                                           instrPC, op0, op1, op2, preA, a, x, y, sp,
-                                           flagN ? "N" : "n", flagZ ? "Z" : "z", flagC ? "C" : "c", flagP ? "P" : "p"))
-                }
-                if traceCountdown == 0 {
-                    traceEnabled2 = false
-                    let traceStr = traceLog2.joined(separator: "\n")
-                    try? traceStr.write(toFile: "/tmp/spc_trace.log", atomically: true, encoding: .utf8)
-                }
-            }
+            traceContext = (instrPC, op0, op1, op2, preA)
+        } else {
+            traceContext = nil
         }
 
         let opcode = fetchByte()
 
-        switch opcode {
+        let cycles: Int = {
+            switch opcode {
 
         // ============================================================
         // NOP
@@ -1271,11 +1268,9 @@ final class SPC700 {
         // ============================================================
         case 0xEF: // SLEEP
             sleeping = true
-            pc &-= 1  // stay at this instruction
             return 3
         case 0xFF: // STOP
             stopped = true
-            pc &-= 1
             return 3
 
         // ============================================================
@@ -1284,6 +1279,23 @@ final class SPC700 {
         default:
             // Unknown opcode — treat as NOP
             return 2
+            }
+        }()
+
+        if let traceContext {
+            if traceLog2.count < 2000 {
+                traceLog2.append(String(format: "$%04X: %02X %02X %02X  A=$%02X→$%02X X=$%02X Y=$%02X SP=$%02X P=%@%@%@%@",
+                                       traceContext.instrPC, traceContext.op0, traceContext.op1, traceContext.op2,
+                                       traceContext.preA, a, x, y, sp,
+                                       flagN ? "N" : "n", flagZ ? "Z" : "z", flagC ? "C" : "c", flagP ? "P" : "p"))
+            }
+            if traceCountdown == 0 {
+                traceEnabled2 = false
+                let traceStr = traceLog2.joined(separator: "\n")
+                try? traceStr.write(toFile: "/tmp/spc_trace.log", atomically: true, encoding: .utf8)
+            }
         }
+
+        return cycles
     }
 }
