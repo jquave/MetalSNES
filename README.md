@@ -77,11 +77,18 @@ MetalSNES/
 ├── Debug/
 │   ├── DebugState.swift           ObservableObject for register/memory snapshots
 │   ├── RegisterView.swift         CPU register display
+│   ├── PPURegisterView.swift      PPU register display
 │   ├── DisassemblerView.swift     Instruction disassembly around PC
-│   └── MemoryViewer.swift         Hex dump
+│   ├── MemoryViewer.swift         Hex dump
+│   ├── SpriteDebugView.swift      OAM sprite inspector
+│   └── VRAMTileViewer.swift       VRAM tile visualization
 ├── Tests/
 │   ├── CPUTestRunner.swift        Headless test ROM runner
 │   └── PPUDiagnostic.swift        Unit tests for PPU rendering
+├── Resources/
+│   ├── Assets.xcassets            App icons and asset catalog
+│   ├── Info.plist                 App configuration
+│   └── MetalSNES.entitlements     Sandbox/entitlements
 ├── Support/
 │   ├── Constants.swift            Clock, screen, memory size constants
 │   └── Types.swift                Address/Byte/Word type aliases
