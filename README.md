@@ -33,7 +33,30 @@ Or just open `MetalSNES.xcodeproj` in Xcode and hit Run.
 
 ## Usage
 
-Launch the app and use the file picker to load a `.sfc` or `.smc` ROM. SRAM is automatically saved to a `.srm` file alongside the ROM on pause and quit. A `--benchmark <rom_path>` CLI flag runs 120 frames headless and prints FPS.
+Launch the app and use the file picker to load a `.sfc` or `.smc` ROM. SRAM is automatically saved to a `.srm` file alongside the ROM on pause and quit.
+
+### CLI Arguments
+
+| Flag | Description |
+|------|-------------|
+| `--rom <path>` | Auto-load a ROM on launch |
+| `--state <path>` | Load a save state after the ROM |
+| `--run-ahead <n>` | Run-ahead frame count |
+| `--benchmark <path>` | Headless CPU benchmark — runs 120 frames, prints FPS |
+| `--benchmark-gpu <path>` | Same as above but includes Metal rendering |
+| `--diagnose-state <rom> <state> [frames]` | Run a save state diagnostic (default 8 frames) |
+| `--serve-state <rom> <state>` | Load a save state and start the debug server without running |
+
+### Debug Server
+
+The built-in HTTP debug server listens on **port 8765** and exposes JSON endpoints for live inspection of the running emulator. Start it with `--serve-state` or programmatically via `EmulatorCore.startDebugServer()`. Hit the root URL to list all available endpoints. Key endpoints:
+
+- `/cpu/regs`, `/cpu/wram`, `/cpu/trace`, `/cpu/recent-trace`, `/cpu/write-log`
+- `/spc/regs`, `/spc/ram`, `/spc/ports`, `/spc/timers`, `/spc/trace`, `/spc/inject`
+- `/dsp/regs`, `/dsp/voices`, `/dsp/kon`
+- `/ppu/vram`, `/ppu/oam`, `/ppu/sprites`, `/ppu/sprite-sample`
+- `/dma/state`, `/bus/regs`, `/audio/stats`
+- `/wram/range`, `/wram/watch`, `/wram/watch/log`
 
 ## Status
 
@@ -67,7 +90,7 @@ MetalSNES/
 │   ├── DMA.swift                  8-channel general DMA + HDMA
 │   ├── Cartridge.swift            LoROM/HiROM header parsing, address translation
 │   ├── Joypad.swift               Thread-safe keyboard→button mapping, strobe/auto-read
-│   ├── DebugServer.swift          HTTP debug endpoints for CPU/SPC/DSP inspection
+│   ├── DebugServer.swift          HTTP debug server (port 8765) for live CPU/SPC/DSP/PPU inspection
 │   ├── SaveState.swift            Full emulator save/load state serialization
 │   └── Timing.swift               Clock constants, mach_absolute_time helpers
 ├── Renderer/
