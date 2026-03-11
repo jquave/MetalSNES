@@ -38,64 +38,164 @@ enum DisplayFilterMode: String, CaseIterable, Codable, Identifiable {
 struct DisplayConfiguration: Codable, Equatable {
     var integerScalingEnabled: Bool
     var filterMode: DisplayFilterMode
-    var brightness: Float
-    var contrast: Float
-    var sharpness: Float
-    var saturation: Float
+    private var profiles: [DisplayFilterMode: DisplayAdjustmentProfile]
 
     init(
         integerScalingEnabled: Bool,
         filterMode: DisplayFilterMode,
-        brightness: Float = 1.0,
-        contrast: Float = 1.0,
-        sharpness: Float = 1.0,
-        saturation: Float = 1.0
+        profiles: [DisplayFilterMode: DisplayAdjustmentProfile] = DisplayConfiguration.defaultProfiles()
     ) {
         self.integerScalingEnabled = integerScalingEnabled
         self.filterMode = filterMode
-        self.brightness = brightness
-        self.contrast = contrast
-        self.sharpness = sharpness
-        self.saturation = saturation
+        self.profiles = profiles
     }
 
     private enum CodingKeys: String, CodingKey {
         case integerScalingEnabled
         case filterMode
+        case profiles
         case brightness
         case contrast
         case sharpness
         case saturation
+        case glowAmount
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         integerScalingEnabled = try container.decode(Bool.self, forKey: .integerScalingEnabled)
         filterMode = try container.decode(DisplayFilterMode.self, forKey: .filterMode)
-        brightness = try container.decodeIfPresent(Float.self, forKey: .brightness) ?? 1.0
-        contrast = try container.decodeIfPresent(Float.self, forKey: .contrast) ?? 1.0
-        sharpness = try container.decodeIfPresent(Float.self, forKey: .sharpness) ?? 1.0
-        saturation = try container.decodeIfPresent(Float.self, forKey: .saturation) ?? 1.0
+        if let decodedProfiles = try container.decodeIfPresent([DisplayFilterMode: DisplayAdjustmentProfile].self, forKey: .profiles) {
+            profiles = DisplayConfiguration.defaultProfiles().merging(decodedProfiles) { _, new in new }
+        } else {
+            let brightness = try container.decodeIfPresent(Float.self, forKey: .brightness) ?? 1.0
+            let contrast = try container.decodeIfPresent(Float.self, forKey: .contrast) ?? 1.0
+            let sharpness = try container.decodeIfPresent(Float.self, forKey: .sharpness) ?? 1.0
+            let saturation = try container.decodeIfPresent(Float.self, forKey: .saturation) ?? 1.0
+            let glowAmount = try container.decodeIfPresent(Float.self, forKey: .glowAmount) ?? 1.0
+            var migratedProfiles = DisplayConfiguration.defaultProfiles()
+            let migratedProfile = DisplayAdjustmentProfile(
+                brightness: brightness,
+                contrast: contrast,
+                sharpness: sharpness,
+                saturation: saturation,
+                glowAmount: glowAmount
+            )
+            for mode in DisplayFilterMode.allCases {
+                migratedProfiles[mode] = migratedProfile
+            }
+            profiles = migratedProfiles
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(integerScalingEnabled, forKey: .integerScalingEnabled)
         try container.encode(filterMode, forKey: .filterMode)
-        try container.encode(brightness, forKey: .brightness)
-        try container.encode(contrast, forKey: .contrast)
-        try container.encode(sharpness, forKey: .sharpness)
-        try container.encode(saturation, forKey: .saturation)
+        try container.encode(profiles, forKey: .profiles)
     }
 
     static let `default` = DisplayConfiguration(
         integerScalingEnabled: true,
-        filterMode: .crt,
-        brightness: 1.0,
-        contrast: 1.0,
-        sharpness: 1.0,
-        saturation: 1.0
+        filterMode: .crt
     )
+
+    var activeAdjustment: DisplayAdjustmentProfile {
+        get {
+            profile(for: filterMode)
+        }
+        set {
+            profiles[filterMode] = newValue
+        }
+    }
+
+    var brightness: Float {
+        get { activeAdjustment.brightness }
+        set {
+            var profile = activeAdjustment
+            profile.brightness = newValue
+            activeAdjustment = profile
+        }
+    }
+
+    var contrast: Float {
+        get { activeAdjustment.contrast }
+        set {
+            var profile = activeAdjustment
+            profile.contrast = newValue
+            activeAdjustment = profile
+        }
+    }
+
+    var sharpness: Float {
+        get { activeAdjustment.sharpness }
+        set {
+            var profile = activeAdjustment
+            profile.sharpness = newValue
+            activeAdjustment = profile
+        }
+    }
+
+    var saturation: Float {
+        get { activeAdjustment.saturation }
+        set {
+            var profile = activeAdjustment
+            profile.saturation = newValue
+            activeAdjustment = profile
+        }
+    }
+
+    var glowAmount: Float {
+        get { activeAdjustment.glowAmount }
+        set {
+            var profile = activeAdjustment
+            profile.glowAmount = newValue
+            activeAdjustment = profile
+        }
+    }
+
+    func profile(for mode: DisplayFilterMode) -> DisplayAdjustmentProfile {
+        profiles[mode] ?? DisplayAdjustmentProfile.default(for: mode)
+    }
+
+    mutating func restoreProfileDefaults(for mode: DisplayFilterMode) {
+        profiles[mode] = DisplayAdjustmentProfile.default(for: mode)
+    }
+
+    private static func defaultProfiles() -> [DisplayFilterMode: DisplayAdjustmentProfile] {
+        Dictionary(uniqueKeysWithValues: DisplayFilterMode.allCases.map { mode in
+            (mode, DisplayAdjustmentProfile.default(for: mode))
+        })
+    }
+}
+
+struct DisplayAdjustmentProfile: Codable, Equatable {
+    var brightness: Float
+    var contrast: Float
+    var sharpness: Float
+    var saturation: Float
+    var glowAmount: Float
+
+    static func `default`(for mode: DisplayFilterMode) -> DisplayAdjustmentProfile {
+        switch mode {
+        case .phosphorHot:
+            return DisplayAdjustmentProfile(
+                brightness: 1.0,
+                contrast: 1.0,
+                sharpness: 1.0,
+                saturation: 1.0,
+                glowAmount: 1.0
+            )
+        default:
+            return DisplayAdjustmentProfile(
+                brightness: 1.0,
+                contrast: 1.0,
+                sharpness: 1.0,
+                saturation: 1.0,
+                glowAmount: 1.0
+            )
+        }
+    }
 }
 
 struct GPULineState {
@@ -129,4 +229,5 @@ struct DisplayUniforms {
     var contrast: Float = 1
     var saturation: Float = 1
     var userSharpness: Float = 1
+    var glowAmount: Float = 1
 }

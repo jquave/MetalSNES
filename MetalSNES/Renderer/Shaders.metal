@@ -37,6 +37,7 @@ struct DisplayUniforms {
     float contrast;
     float saturation;
     float userSharpness;
+    float glowAmount;
 };
 
 struct PixelSample {
@@ -132,23 +133,23 @@ inline float3 trinitronCellMask(float localTexelX,
                                 float localTexelY,
                                 float strength) {
     float3 cells = float3(
-        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.29, 0.82, 4.0),
-        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.29, 0.82, 4.0),
-        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.29, 0.82, 4.0)
+        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.34, 0.92, 4.0),
+        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.34, 0.92, 4.0),
+        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.34, 0.92, 4.0)
     );
     float3 glow = float3(
-        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.54, 1.10, 2.0),
-        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.54, 1.10, 2.0),
-        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.54, 1.10, 2.0)
+        trinitronCellShape(localTexelX, localTexelY, 0.44, 0.68, 1.20, 2.0),
+        trinitronCellShape(localTexelX, localTexelY, 1.50, 0.68, 1.20, 2.0),
+        trinitronCellShape(localTexelX, localTexelY, 2.56, 0.68, 1.20, 2.0)
     );
-    cells = clamp(cells + glow * 0.44, 0.0, 1.0);
-    return mix(float3(1.0 - strength), float3(1.0), cells);
+    cells = clamp(cells + glow * 0.34, 0.0, 1.0);
+    return mix(float3(1.0 - strength * 0.52), float3(1.0), cells);
 }
 
 inline float trinitronScanlineMask(float localTexelY, float strength) {
     float phase = fract(localTexelY);
     float beam = exp(-16.0 * pow(phase - 0.5, 2.0));
-    return mix(1.0 - strength, 1.0, beam);
+    return mix(1.0 - strength * 0.55, 1.0, beam);
 }
 
 inline float3 samplePhosphorBloom(texture2d<float> tex,
@@ -252,11 +253,12 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
         bool hotPhosphor = uniforms.filterMode == 4u;
         float focus = clamp(filterSharpness, 0.0, 1.0);
         float glowBoost = max(displayBrightness - 1.0, 0.0);
+        float trinitronGlow = clamp(uniforms.glowAmount, 0.25, 2.0);
         float sigmaX = hotPhosphor
-            ? mix(1.78, 1.22, focus) + glowBoost * 0.34
+            ? mix(1.92, 1.28, focus) + glowBoost * 0.30 + (trinitronGlow - 1.0) * 0.38
             : mix(1.05, 0.62, focus);
         float sigmaY = hotPhosphor
-            ? mix(1.08, 0.68, focus) + glowBoost * 0.22
+            ? mix(1.14, 0.72, focus) + glowBoost * 0.18 + (trinitronGlow - 1.0) * 0.20
             : mix(0.78, 0.46, focus);
         float3 phosphor = samplePhosphorBloom(
             tex,
@@ -265,13 +267,13 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
             uniforms.textureSize,
             sigmaX,
             sigmaY,
-            hotPhosphor ? min(0.92, 0.84 + glowBoost * 0.06) : min(0.88, 0.78 + glowBoost * 0.04),
+            hotPhosphor ? min(0.95, 0.82 + glowBoost * 0.05 + (trinitronGlow - 1.0) * 0.08) : min(0.88, 0.78 + glowBoost * 0.04),
             hotPhosphor ? 0.08 : 0.18,
             hotPhosphor
-                ? (0.44 + uniforms.bloomStrength * 0.58) * (1.0 + glowBoost * 1.15)
+                ? (0.40 + uniforms.bloomStrength * 0.52) * (1.0 + glowBoost * 1.05) * mix(0.70, 1.55, clamp(trinitronGlow * 0.5, 0.0, 1.0))
                 : (0.30 + uniforms.bloomStrength * 0.45) * (1.0 + glowBoost * 0.75),
             hotPhosphor
-                ? uniforms.bloomStrength * 0.38 * (1.0 + glowBoost * 1.35)
+                ? uniforms.bloomStrength * 0.30 * (1.0 + glowBoost * 1.10) * mix(0.72, 1.70, clamp(trinitronGlow * 0.5, 0.0, 1.0))
                 : uniforms.bloomStrength * 0.22 * (1.0 + glowBoost * 0.80),
             hotPhosphor ? 0.34 : 0.55,
             hotPhosphor
@@ -285,13 +287,13 @@ fragment float4 fragmentShader(VertexOut in [[stage_in]],
             float lineMask = trinitronScanlineMask(localTexelY, uniforms.scanlineStrength);
             float beamLuma = dot(phosphor, float3(0.2126, 0.7152, 0.0722));
             float highlightGlow = smoothstep(0.40, 1.0, beamLuma);
-            float grayPedestal = (0.020 + beamLuma * 0.085) * (1.0 + glowBoost * 0.55);
+            float grayPedestal = (0.022 + beamLuma * 0.078) * (1.0 + glowBoost * 0.42 + (trinitronGlow - 1.0) * 0.18);
 
-            phosphor *= cellMask;
-            phosphor *= lineMask;
+            phosphor *= mix(float3(1.0), cellMask, 0.58);
+            phosphor *= mix(1.0, lineMask, 0.60);
             phosphor += (float3(grayPedestal) * (float3(0.60) + cellMask * 0.50)) * lineMask;
-            phosphor += float3(highlightGlow * beamLuma * (0.17 + glowBoost * 0.12));
-            phosphor += max(phosphor - 0.12, 0.0) * (0.24 + glowBoost * 0.18);
+            phosphor += float3(highlightGlow * beamLuma * (0.14 + glowBoost * 0.08 + (trinitronGlow - 1.0) * 0.12));
+            phosphor += max(phosphor - 0.12, 0.0) * (0.18 + glowBoost * 0.12 + (trinitronGlow - 1.0) * 0.18);
             phosphor = pow(max(phosphor, 0.0), float3(0.88));
         } else {
             float3 mask = apertureGrilleMask(

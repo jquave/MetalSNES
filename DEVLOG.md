@@ -993,3 +993,98 @@ There are **33 locations** in the ROM that write to $1DFB (music trigger). The e
 ### Expected Result
 - In the Zelda throne-room save state, the cap pixel near `(127, 65)` should now come from Link rather than the altar/front overlay sprite.
 - This fix should also correct any other scenes where lower-index sprites were being incorrectly hidden by later OAM entries with higher OBJ priority bits.
+
+## 2026-03-10: Phase 2 Architecture Plan
+
+### Context
+- The current hybrid renderer keeps a CPU reference path and a Metal live path, but both still independently implement too much SNES rendering policy.
+- That makes correctness debugging harder than it needs to be because sprite rules, window rules, color math rules, and mode-specific priority behavior can drift across two implementations.
+
+### Plan
+- Added `PHASE2.md` to define the next architecture target:
+  - CPU/PPU remains authoritative for correctness-critical decisions
+  - Metal remains the default live composition/presentation path
+  - the key migration steps are canonical priority tables, resolved per-scanline sprite winner buffers, resolved window masks, and more explicit color-math plans
+- The plan is intentionally incremental and keeps the CPU renderer alive as a reference backend and parity oracle.
+
+## 2026-03-10: Trinitron Tuning + Responsive Header + Per-Filter Image Profiles
+
+### Context
+- The Trinitron preset was reading too much like a visible overlay mesh instead of a softer phosphor/grille structure.
+- The in-stage header could wrap visible buttons in smaller windows.
+- The image-tuning HUD was still too large and awkward to use, and the global brightness/contrast/sharpness/saturation settings were not a good fit once the filters diverged more.
+
+### Changes
+- Retuned the Trinitron preset in `Shaders.metal` and `MetalRenderer.swift`:
+  - reduced mask/scanline harshness,
+  - softened the visible grille contrast,
+  - and added a dedicated Trinitron `glowAmount` control path.
+- Reworked display persistence in `Types.swift` so image tuning is stored per filter profile instead of one global set of values.
+- Updated the SwiftUI shell in `ContentView.swift`:
+  - the stage header now has responsive regular/medium/compact layouts so action buttons stop wrapping,
+  - and the display HUD is now a smaller tuner panel with dial-style controls instead of the larger scrolling settings stack.
+- The tuner only shows the `Glow` dial when `Trinitron` is selected.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- A short `mario.sfc` smoke run produced no runtime output in `/tmp/metalsnes-ui-smoke.txt`.
+
+## 2026-03-10: Image Tuner Drag Fix + Label Layout Cleanup
+
+### Context
+- The `Image Tuner` dials were hard to use because dragging them could trigger whole-window dragging.
+- The compact tuner chips were also truncating labels too aggressively in the fixed-width HUD.
+
+### Changes
+- Disabled global `isMovableByWindowBackground` window dragging and replaced it with a dedicated drag region behind the title block in `ContentView.swift`.
+- Reworked the tuner chip row into a small two-column grid, widened the HUD slightly, and allowed chip values to wrap to two lines instead of truncating immediately.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- A short `mario.sfc` smoke run again produced no runtime output in `/tmp/metalsnes-ui-smoke.txt`.
+
+## 2026-03-10: Header Drag Region Regression + Compact Image Tuner Bar
+
+### Context
+- The first pass at restoring custom window dragging expanded the header overlay to nearly the full stage, which also made the display tuner feel like a large side sheet again.
+- The tuner controls were still too large, and the action chips could truncate text awkwardly.
+
+### Changes
+- Replaced the unconstrained header drag-region layering with a drag handle attached only to the title block background in `ContentView.swift`.
+- Reshaped the `Image Tuner` into a compact top utility bar:
+  - a smaller title row,
+  - a horizontal row of action chips,
+  - and a horizontal row of smaller dial controls.
+- Widened the tuner bar while reducing the individual control sizes so full words are more likely to fit without the overlay becoming dominant.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- A short `mario.sfc` smoke run produced no runtime output in `/tmp/metalsnes-ui-smoke.txt`.
+
+## 2026-03-10: Smaller Tuner + Full-Word Header Menus
+
+### Context
+- The previous compact tuner was still too large relative to the game viewport.
+- At medium window sizes the header status pills were still compressing down to unreadable `FIL...` / `SC...` / `LA...` labels.
+
+### Changes
+- Switched medium/compact header status controls to dedicated single-line menu chips with full words instead of two-line label/value pills.
+- Reduced the tuner width again and scaled down the individual chips and dial controls so the overlay takes less of the game area.
+- Let tuner chip values wrap to two lines where needed instead of forcing aggressive truncation.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.
+- A short `mario.sfc` smoke run produced no runtime output in `/tmp/metalsnes-ui-smoke.txt`.
+
+## 2026-03-10: Dynamic Trinitron Tuner Width + Header Space Rebalancing
+
+### Context
+- The tuner still clipped when the Trinitron-only `Glow` control appeared.
+- The header status chips could still ellipsize when the left title area and action cluster competed for width.
+
+### Changes
+- Made the display tuner width dynamic in `ContentView.swift`, with a wider cap when `Trinitron` is selected so the extra `Glow` dial has room.
+- Rebalanced the header layout in `ContentView.swift` so the title area yields width first, and forced the status/action clusters to keep their intrinsic width instead of collapsing their labels.
+
+### Validation
+- `xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build` succeeded.

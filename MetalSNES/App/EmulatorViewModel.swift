@@ -253,6 +253,12 @@ final class EmulatorViewModel: ObservableObject {
         displayConfiguration = .default
     }
 
+    func restoreCurrentDisplayProfile() {
+        var configuration = displayConfiguration
+        configuration.restoreProfileDefaults(for: configuration.filterMode)
+        displayConfiguration = configuration
+    }
+
     private static func clampRunAheadFrames(_ value: Int) -> Int {
         min(max(value, 0), 1)
     }

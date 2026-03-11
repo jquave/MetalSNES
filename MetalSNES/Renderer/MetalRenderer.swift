@@ -321,15 +321,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let contentOriginY = floor((drawableHeight - contentHeight) * 0.5)
 
         var uniforms = DisplayUniforms()
+        let activeProfile = displayConfiguration.profile(for: displayConfiguration.filterMode)
         uniforms.viewportSize = SIMD2(drawableWidth, drawableHeight)
         uniforms.textureSize = SIMD2(textureWidth, textureHeight)
         uniforms.contentOrigin = SIMD2(contentOriginX, contentOriginY)
         uniforms.contentSize = SIMD2(contentWidth, contentHeight)
         uniforms.integerScalingEnabled = displayConfiguration.integerScalingEnabled ? 1 : 0
-        uniforms.brightness = min(max(displayConfiguration.brightness, 0.4), 2.2)
-        uniforms.contrast = min(max(displayConfiguration.contrast, 0.4), 2.0)
-        uniforms.saturation = min(max(displayConfiguration.saturation, 0.0), 2.0)
-        uniforms.userSharpness = min(max(displayConfiguration.sharpness, 0.5), 1.8)
+        uniforms.brightness = min(max(activeProfile.brightness, 0.4), 2.2)
+        uniforms.contrast = min(max(activeProfile.contrast, 0.4), 2.0)
+        uniforms.saturation = min(max(activeProfile.saturation, 0.0), 2.0)
+        uniforms.userSharpness = min(max(activeProfile.sharpness, 0.5), 1.8)
+        uniforms.glowAmount = min(max(activeProfile.glowAmount, 0.25), 2.0)
 
         switch displayConfiguration.filterMode {
         case .clean:
@@ -366,12 +368,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             uniforms.sharpness = 0.72
         case .phosphorHot:
             uniforms.filterMode = 4
-            uniforms.scanlineStrength = 0.27
-            uniforms.maskStrength = 0.38
-            uniforms.bloomStrength = 0.86
+            uniforms.scanlineStrength = 0.18
+            uniforms.maskStrength = 0.24
+            uniforms.bloomStrength = 0.9
             uniforms.curvature = 0
             uniforms.vignetteStrength = 0
-            uniforms.sharpness = 0.56
+            uniforms.sharpness = 0.5
         }
 
         return uniforms

@@ -1,8 +1,43 @@
 # MetalSNES
 
-A from-scratch implementation of the SNES vibe coded with Codex and Claude Code (with lots of hand holding)
+A from-scratch SNES emulator for macOS, built with SwiftUI, Metal, and a C CPU core. Vibe coded with Codex and Claude Code (with lots of hand holding).
 
-Current status: LoROM and HiROM boot, save states and the debug server work, and both the PPU and APU are real implementations rather than stubs. PPU accuracy gaps remain, and audio is functional but still under active accuracy work.
+## Features
+
+- **65C816 CPU** — Full instruction set implemented in C with a 256-entry dispatch table
+- **PPU** — Scanline renderer supporting Modes 0/1/2/3/4/5/6/7, priority compositing, color math, 16x16 tiles, and sprites
+- **APU** — SPC700 CPU + S-DSP with BRR decoding, ADSR/GAIN envelopes, echo, and FIR filtering, output via AVAudioEngine
+- **DMA** — General DMA (all 8 channels, all transfer modes) and per-scanline HDMA
+- **Cartridge** — LoROM and HiROM mapping with SRAM persistence (.srm files)
+- **Metal rendering** — Nearest-neighbor fullscreen quad, double-buffered texture upload
+- **Save states** — Full emulator state serialization and restore
+- **Debug tools** — Register inspector, disassembler, memory hex viewer, VRAM tile viewer, sprite debug view, PPU register view, and an HTTP debug server
+- **Input** — Keyboard-mapped joypad with auto-read and manual strobe support
+
+## Building
+
+Requires macOS with Xcode installed.
+
+```bash
+# Make sure xcode-select points to Xcode (not just CommandLineTools)
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+
+# Accept the license if you haven't already
+sudo xcodebuild -license accept
+
+# Build (Release recommended — debug builds are ~25x slower)
+xcodebuild -project MetalSNES.xcodeproj -scheme MetalSNES -configuration Release build
+```
+
+Or just open `MetalSNES.xcodeproj` in Xcode and hit Run.
+
+## Usage
+
+Launch the app and use the file picker to load a `.sfc` or `.smc` ROM. SRAM is automatically saved to a `.srm` file alongside the ROM on pause and quit. A `--benchmark <rom_path>` CLI flag runs 120 frames headless and prints FPS.
+
+## Status
+
+LoROM and HiROM boot, save states and the debug server work, and both the PPU and APU are real implementations rather than stubs. PPU accuracy gaps remain, and audio is functional but still under active accuracy work. Performance is roughly 400+ FPS in Release mode on Apple Silicon (~6.8x realtime).
 
 # MetalSNES — Code Flow & Architecture
 
@@ -13,7 +48,8 @@ MetalSNES/
 ├── App/
 │   ├── MetalSNESApp.swift         @main entry, WindowGroup
 │   ├── EmulatorViewModel.swift    ObservableObject, ROM loading, SRAM persistence, thread mgmt
-│   └── ContentView.swift          SwiftUI layout, HSplitView, file picker, controls
+│   ├── ContentView.swift          SwiftUI layout, HSplitView, file picker, controls
+│   └── InputManager.swift         Keyboard/input configuration
 ├── CPU/
 │   ├── CPU.swift                  Swift wrapper around C dispatch, trace logging
 │   └── CPUInstructions.swift      Opcode→mnemonic table for disassembly
