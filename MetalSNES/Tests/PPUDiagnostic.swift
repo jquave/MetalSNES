@@ -19,14 +19,15 @@ final class PPUDiagnostic {
 
     static func runAll() {
         log("=== PPU Diagnostic Tests ===")
-        let ppu = PPU()
         var passed = 0
         var failed = 0
 
-        if testBackdropColor(ppu) { passed += 1 } else { failed += 1 }
-        if testSingle2bppTile(ppu) { passed += 1 } else { failed += 1 }
-        if test4bppTile(ppu) { passed += 1 } else { failed += 1 }
-        if testVRAMAddressVariation(ppu) { passed += 1 } else { failed += 1 }
+        if testBackdropColor(PPU()) { passed += 1 } else { failed += 1 }
+        if testSingle2bppTile(PPU()) { passed += 1 } else { failed += 1 }
+        if test4bppTile(PPU()) { passed += 1 } else { failed += 1 }
+        if testVRAMAddressVariation(PPU()) { passed += 1 } else { failed += 1 }
+        if testSubscreenWindowMasking(PPU()) { passed += 1 } else { failed += 1 }
+        if testMode2BGPriority(PPU()) { passed += 1 } else { failed += 1 }
 
         log("=== PPU Results: \(passed) passed, \(failed) failed ===")
     }
@@ -73,7 +74,7 @@ final class PPUDiagnostic {
         // BG1 tilemap at VRAM word addr 0 → byte addr 0
         ppu.bg1sc = 0x00    // base = 0, 32x32
 
-        // BG1 chr at block 1: bg12nba low nibble = 1 → byte addr 0x4000 (8K words = 16KB)
+        // BG1 chr at block 1: bg12nba low nibble = 1 → byte addr 0x2000 (4K words = 8KB)
         ppu.bg12nba = 0x01
 
         // Backdrop = red
@@ -87,11 +88,11 @@ final class PPUDiagnostic {
         ppu.vram[0] = 0x01
         ppu.vram[1] = 0x00
 
-        // Write 2bpp tile 1 at chr base 0x4000 + 16 bytes
+        // Write 2bpp tile 1 at chr base 0x2000 + 16 bytes
         // 2bpp: 16 bytes per tile, 2 bytes per row
         // Pixel value 1 for all pixels: bp0=0xFF (all bits set), bp1=0x00
         for row in 0..<8 {
-            let addr = 0x4000 + 16 + row * 2  // tile 1 offset
+            let addr = 0x2000 + 16 + row * 2  // tile 1 offset
             ppu.vram[addr] = 0xFF     // bitplane 0: all 1s
             ppu.vram[addr + 1] = 0x00 // bitplane 1: all 0s
         }
@@ -141,7 +142,7 @@ final class PPUDiagnostic {
         // (scReg & 0xFC) << 9 = 0x0800 → scReg & 0xFC = 0x04 → scReg = 0x04
         ppu.bg1sc = 0x04    // tilemap base = byte 0x0800, 32x32
 
-        // BG1 chr at block 2: bg12nba low nibble = 2 → byte addr 0x8000 (8K words = 16KB per block)
+        // BG1 chr at block 2: bg12nba low nibble = 2 → byte addr 0x4000 (4K words = 8KB per block)
         ppu.bg12nba = 0x02
 
         // Backdrop = blue (BGR555: 0x7C00)
@@ -154,10 +155,10 @@ final class PPUDiagnostic {
         ppu.vram[0x0800] = 0x00
         ppu.vram[0x0801] = 0x00
 
-        // 4bpp tile 0 at chr base 0x8000: 32 bytes per tile
+        // 4bpp tile 0 at chr base 0x4000: 32 bytes per tile
         // Set pixel value 1: bp0=0xFF, bp1=0x00, bp2=0x00, bp3=0x00
         for row in 0..<8 {
-            let addr = 0x8000 + row * 2
+            let addr = 0x4000 + row * 2
             ppu.vram[addr] = 0xFF       // bitplane 0
             ppu.vram[addr + 1] = 0x00   // bitplane 1
             ppu.vram[addr + 16] = 0x00  // bitplane 2
@@ -193,7 +194,7 @@ final class PPUDiagnostic {
         // (scReg & 0xFC) << 9 = 0x1000 → scReg & 0xFC = 0x08 → scReg = 0x08
         ppu.bg1sc = 0x08
 
-        // BG1 chr at block 3: bg12nba low nibble = 3 → byte addr 0xC000 (8K words = 16KB per block)
+        // BG1 chr at block 3: bg12nba low nibble = 3 → byte addr 0x6000 (4K words = 8KB per block)
         ppu.bg12nba = 0x03
 
         // Backdrop = black
@@ -206,9 +207,9 @@ final class PPUDiagnostic {
         ppu.vram[0x1000] = 0x01
         ppu.vram[0x1001] = 0x00
 
-        // 2bpp tile 1 at chr base 0xC000 + 16 bytes (tile 1 offset)
+        // 2bpp tile 1 at chr base 0x6000 + 16 bytes (tile 1 offset)
         // Pixel value 2: bp0=0x00, bp1=0xFF
-        let tileAddr = 0xC000 + 1 * 16
+        let tileAddr = 0x6000 + 1 * 16
         for row in 0..<8 {
             let addr = tileAddr + row * 2
             ppu.vram[addr] = 0x00     // bitplane 0: all 0s
@@ -228,6 +229,155 @@ final class PPUDiagnostic {
             log("  FAIL: expected (\(expectTile.r), \(expectTile.g), \(expectTile.b)), got (\(tilePixel.r), \(tilePixel.g), \(tilePixel.b))")
             return false
         }
+    }
+
+    // MARK: - Test 5: Sub-screen Window Masking
+
+    private static func testSubscreenWindowMasking(_ ppu: PPU) -> Bool {
+        log("\n[Test 5] Sub-screen Window Masking")
+        resetPPU(ppu)
+
+        ppu.inidisp = 0x0F
+        ppu.bgmode = 0x00
+        ppu.tm = 0x00
+        ppu.ts = 0x01
+        ppu.cgadsub = 0x20
+        ppu.cgwsel = 0x02
+
+        ppu.bg1sc = 0x00
+        ppu.bg12nba = 0x01
+
+        ppu.w12sel = 0x02
+        ppu.wh0 = 0
+        ppu.wh1 = 127
+        ppu.wh2 = 0
+        ppu.wh3 = 0
+        ppu.wbglog = 0x00
+        ppu.tmw = 0x00
+        ppu.tsw = 0x01
+
+        writeCGRAM(ppu, index: 0, bgr555: 0x0000)
+        writeCGRAM(ppu, index: 1, bgr555: 0x03E0)
+
+        for column in 0..<32 {
+            let tilemapAddr = column * 2
+            ppu.vram[tilemapAddr] = 0x01
+            ppu.vram[tilemapAddr + 1] = 0x00
+        }
+        for row in 0..<8 {
+            let addr = 0x2000 + 16 + row * 2
+            ppu.vram[addr] = 0xFF
+            ppu.vram[addr + 1] = 0x00
+        }
+
+        ppu.renderScanline(0)
+
+        let maskedPixel = ppu.readPixel(x: 0, y: 0)
+        let visiblePixel = ppu.readPixel(x: 200, y: 0)
+        let expectMasked = (r: UInt8(0x00), g: UInt8(0x00), b: UInt8(0x00))
+        let expectVisible = (r: UInt8(0x00), g: UInt8(0xF8), b: UInt8(0x00))
+
+        var ok = true
+        if maskedPixel.r == expectMasked.r && maskedPixel.g == expectMasked.g && maskedPixel.b == expectMasked.b {
+            log("  PASS: masked sub-screen pixel stayed black")
+        } else {
+            log("  FAIL: masked sub-screen pixel expected black, got (\(maskedPixel.r), \(maskedPixel.g), \(maskedPixel.b))")
+            ok = false
+        }
+
+        if visiblePixel.r == expectVisible.r && visiblePixel.g == expectVisible.g && visiblePixel.b == expectVisible.b {
+            log("  PASS: visible sub-screen pixel blended correctly")
+        } else {
+            log("  FAIL: visible sub-screen pixel expected (\(expectVisible.r), \(expectVisible.g), \(expectVisible.b)), got (\(visiblePixel.r), \(visiblePixel.g), \(visiblePixel.b))")
+            ok = false
+        }
+
+        return ok
+    }
+
+    // MARK: - Test 6: Mode 2 BG Priority Ordering
+
+    private static func testMode2BGPriority(_ ppu: PPU) -> Bool {
+        log("\n[Test 6] Mode 2 BG Priority Ordering")
+        resetPPU(ppu)
+
+        ppu.inidisp = 0x0F
+        ppu.bgmode = 0x02
+        ppu.tm = 0x03
+        ppu.bg1sc = 0x00
+        ppu.bg2sc = 0x04
+        ppu.bg3sc = 0x08
+        ppu.bg12nba = 0x21
+
+        writeCGRAM(ppu, index: 0, bgr555: 0x0000)
+        writeCGRAM(ppu, index: 1, bgr555: 0x001F)
+        writeCGRAM(ppu, index: 2, bgr555: 0x03E0)
+
+        ppu.vram[0x0000] = 0x00
+        ppu.vram[0x0001] = 0x00
+        ppu.vram[0x0800] = 0x00
+        ppu.vram[0x0801] = 0x00
+
+        for row in 0..<8 {
+            let bg1Addr = 0x2000 + row * 2
+            let bg2Addr = 0x4000 + row * 2
+
+            ppu.vram[bg1Addr] = 0xFF
+            ppu.vram[bg1Addr + 1] = 0x00
+            ppu.vram[bg1Addr + 16] = 0x00
+            ppu.vram[bg1Addr + 17] = 0x00
+
+            ppu.vram[bg2Addr] = 0x00
+            ppu.vram[bg2Addr + 1] = 0xFF
+            ppu.vram[bg2Addr + 16] = 0x00
+            ppu.vram[bg2Addr + 17] = 0x00
+        }
+
+        ppu.renderScanline(0)
+
+        let lowPriorityPixel = ppu.readPixel(x: 0, y: 0)
+        let expectBG1 = (r: UInt8(0xF8), g: UInt8(0x00), b: UInt8(0x00))
+
+        var ok = true
+        if lowPriorityPixel.r == expectBG1.r &&
+            lowPriorityPixel.g == expectBG1.g &&
+            lowPriorityPixel.b == expectBG1.b {
+            log("  PASS: BG1 low priority draws above BG2 low priority")
+        } else {
+            log("  FAIL: expected BG1 low priority red, got (\(lowPriorityPixel.r), \(lowPriorityPixel.g), \(lowPriorityPixel.b))")
+            ok = false
+        }
+
+        ppu.vram[0x0801] = 0x20
+        ppu.renderScanline(1)
+
+        let bg2HighPixel = ppu.readPixel(x: 0, y: 1)
+        let expectBG2 = (r: UInt8(0x00), g: UInt8(0xF8), b: UInt8(0x00))
+
+        if bg2HighPixel.r == expectBG2.r &&
+            bg2HighPixel.g == expectBG2.g &&
+            bg2HighPixel.b == expectBG2.b {
+            log("  PASS: BG2 high priority draws above BG1 low priority")
+        } else {
+            log("  FAIL: expected BG2 high priority green, got (\(bg2HighPixel.r), \(bg2HighPixel.g), \(bg2HighPixel.b))")
+            ok = false
+        }
+
+        ppu.vram[0x0001] = 0x20
+        ppu.renderScanline(2)
+
+        let bothHighPixel = ppu.readPixel(x: 0, y: 2)
+
+        if bothHighPixel.r == expectBG1.r &&
+            bothHighPixel.g == expectBG1.g &&
+            bothHighPixel.b == expectBG1.b {
+            log("  PASS: BG1 high priority draws above BG2 high priority")
+        } else {
+            log("  FAIL: expected BG1 high priority red over BG2 high priority, got (\(bothHighPixel.r), \(bothHighPixel.g), \(bothHighPixel.b))")
+            ok = false
+        }
+
+        return ok
     }
 
     // MARK: - ROM Runtime Test
@@ -1320,6 +1470,7 @@ final class PPUDiagnostic {
     private static func resetPPU(_ ppu: PPU) {
         ppu.inidisp = 0x80
         ppu.bgmode = 0
+        ppu.mosaic = 0
         ppu.tm = 0
         ppu.ts = 0
         ppu.bg1sc = 0
@@ -1334,14 +1485,26 @@ final class PPUDiagnostic {
         ppu.cgwsel = 0
         ppu.cgadsub = 0
         ppu.coldata = 0
+        ppu.w12sel = 0
+        ppu.w34sel = 0
+        ppu.wobjsel = 0
+        ppu.wh0 = 0
+        ppu.wh1 = 0
+        ppu.wh2 = 0
+        ppu.wh3 = 0
+        ppu.wbglog = 0
+        ppu.wobjlog = 0
+        ppu.tmw = 0
+        ppu.tsw = 0
         for i in 0..<ppu.vram.count { ppu.vram[i] = 0 }
         for i in 0..<ppu.cgram.count { ppu.cgram[i] = 0 }
         for i in 0..<ppu.oam.count { ppu.oam[i] = 0 }
+        ppu.restoreSnapshot(PPU.Snapshot())
     }
 
     private static func writeCGRAM(_ ppu: PPU, index: Int, bgr555: UInt16) {
-        let addr = index * 2
-        ppu.cgram[addr] = UInt8(bgr555 & 0xFF)
-        ppu.cgram[addr + 1] = UInt8((bgr555 >> 8) & 0x7F)
+        ppu.write(register: 0x2121, value: UInt8(index & 0xFF))
+        ppu.write(register: 0x2122, value: UInt8(bgr555 & 0xFF))
+        ppu.write(register: 0x2122, value: UInt8((bgr555 >> 8) & 0x7F))
     }
 }

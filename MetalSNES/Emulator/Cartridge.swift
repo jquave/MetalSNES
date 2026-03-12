@@ -1,6 +1,22 @@
 import Foundation
 
 struct Cartridge {
+    enum GSUVariant {
+        case starFox
+        case standard
+    }
+
+    enum Coprocessor: String {
+        case dsp = "DSP"
+        case gsu = "Super FX (GSU)"
+        case obc1 = "OBC1"
+        case sa1 = "SA-1"
+        case sdd1 = "S-DD1"
+        case srtc = "S-RTC"
+        case other = "other coprocessor"
+        case custom = "custom coprocessor"
+    }
+
     let romData: [UInt8]
     let romMask: Int  // romData.count - 1, valid when count is power of 2
     let title: String
@@ -8,17 +24,48 @@ struct Cartridge {
     let romType: UInt8
     let romSizeKB: Int
     let sramSizeKB: Int
+    let cartRAMSizeBytes: Int
     let isLoROM: Bool
+    let coprocessor: Coprocessor?
+    let gsuVariant: GSUVariant?
     var romURL: URL?
 
     enum CartridgeError: Error, LocalizedError {
         case tooSmall
         case invalidHeader
+        case unsupportedHardware(String)
         var errorDescription: String? {
             switch self {
             case .tooSmall: return "ROM file too small"
             case .invalidHeader: return "Invalid ROM header"
+            case .unsupportedHardware(let message): return message
             }
+        }
+    }
+
+    private static func detectCoprocessor(romType: UInt8) -> Coprocessor? {
+        let lowNibble = romType & 0x0F
+        let highNibble = romType >> 4
+
+        switch highNibble {
+        case 0x0:
+            return lowNibble >= 0x03 ? .dsp : nil
+        case 0x1:
+            return .gsu
+        case 0x2:
+            return .obc1
+        case 0x3:
+            return .sa1
+        case 0x4:
+            return .sdd1
+        case 0x5:
+            return .srtc
+        case 0xE:
+            return .other
+        case 0xF:
+            return .custom
+        default:
+            return nil
         }
     }
 
@@ -89,12 +136,24 @@ struct Cartridge {
 
         self.mapMode = rom[headerOffset + 0x15]
         self.romType = rom[headerOffset + 0x16]
+        self.coprocessor = Cartridge.detectCoprocessor(romType: romType)
 
         let romSizeByte = rom[headerOffset + 0x17]
         self.romSizeKB = (1 << Int(romSizeByte))
 
         let sramSizeByte = rom[headerOffset + 0x18]
         self.sramSizeKB = sramSizeByte == 0 ? 0 : (1 << Int(sramSizeByte))
+        self.cartRAMSizeBytes = max(
+            self.sramSizeKB * 1024,
+            self.coprocessor == .gsu ? 0x8000 : 0
+        )
+        self.gsuVariant = self.coprocessor == .gsu
+            ? (rom.count <= 0x100000 ? .starFox : .standard)
+            : nil
+
+        if let coprocessor, coprocessor != .gsu {
+            throw CartridgeError.unsupportedHardware("\(coprocessor.rawValue) cartridges are not supported yet")
+        }
 
         self.isLoROM = (mapMode & 0x01) == 0
     }
@@ -120,5 +179,62 @@ struct Cartridge {
         let addr = isLoROM ? loromAddress(bank: bank, offset: offset)
                            : hiromAddress(bank: bank, offset: offset)
         return romData[addr]
+    }
+
+    func gsuCPUROMAddress(bank: UInt8, offset: UInt16) -> Int? {
+        guard let gsuVariant else { return nil }
+
+        switch gsuVariant {
+        case .starFox:
+            switch bank {
+            case 0x00...0x1F, 0x80...0x9F:
+                guard offset >= 0x8000 else { return nil }
+                let bankIndex = Int(bank & 0x1F)
+                return ((bankIndex << 15) | Int(offset & 0x7FFF)) & romMask
+            default:
+                return nil
+            }
+
+        case .standard:
+            switch bank {
+            case 0x00...0x3F, 0x80...0xBF:
+                guard offset >= 0x8000 else { return nil }
+                let bankIndex = Int(bank & 0x3F)
+                return ((bankIndex << 15) | Int(offset & 0x7FFF)) & romMask
+            case 0x40...0x5F, 0xC0...0xDF:
+                let bankIndex = Int(bank & 0x1F)
+                return ((bankIndex << 16) | Int(offset)) & romMask
+            default:
+                return nil
+            }
+        }
+    }
+
+    func gsuCPURAMAddress(bank: UInt8, offset: UInt16) -> Int? {
+        guard let gsuVariant, cartRAMSizeBytes > 0 else { return nil }
+        let ramMask = cartRAMSizeBytes - 1
+
+        switch gsuVariant {
+        case .starFox:
+            switch bank {
+            case 0x60...0x7D, 0xE0...0xFF:
+                let bankIndex = Int(bank & 0x1F)
+                return ((bankIndex << 16) | Int(offset)) & ramMask
+            default:
+                return nil
+            }
+
+        case .standard:
+            switch bank {
+            case 0x00...0x3F, 0x80...0xBF:
+                guard offset >= 0x6000 && offset <= 0x7FFF else { return nil }
+                return Int(offset - 0x6000) & ramMask
+            case 0x70...0x71, 0xF0...0xF1:
+                let bankIndex = Int(bank & 0x01)
+                return ((bankIndex << 16) | Int(offset)) & ramMask
+            default:
+                return nil
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@ final class PPU {
 
     struct Snapshot {
         var scrollLatch: UInt8 = 0
+        var bghofsLatch: UInt8 = 0
         var vramPrefetch: UInt16 = 0
         var fixedColorR: UInt8 = 0
         var fixedColorG: UInt8 = 0
@@ -20,6 +21,38 @@ final class PPU {
         var cgramFlipFlop = false
         var m7Latch: UInt8 = 0
         var mpyResult: Int32 = 0
+    }
+
+    struct DebugBG4bppSample {
+        var bg: Int
+        var screenX: Int
+        var screenY: Int
+        var sampleX: Int
+        var sampleY: Int
+        var hScroll: Int
+        var vScroll: Int
+        var horizontalOffsetEntry: UInt16
+        var verticalOffsetEntry: UInt16
+        var horizontalOffsetApplied: Bool
+        var verticalOffsetApplied: Bool
+        var tileEntry: UInt16
+        var tileNumber: Int
+        var palette: Int
+        var highPriority: Bool
+        var hFlip: Bool
+        var vFlip: Bool
+        var pixel: Int
+        var colorIndex: Int
+        var chrAddr: Int
+    }
+
+    private struct Mode2ScrollResult {
+        var hScroll: Int
+        var vScroll: Int
+        var horizontalEntry: UInt16
+        var verticalEntry: UInt16
+        var horizontalApplied: Bool
+        var verticalApplied: Bool
     }
 
     private static let bitplanePairPixelTable: [UInt64] = {
@@ -73,6 +106,7 @@ final class PPU {
     var bgHScroll = [UInt16](repeating: 0, count: 4)
     var bgVScroll = [UInt16](repeating: 0, count: 4)
     private var scrollLatch: UInt8 = 0
+    private var bghofsLatch: UInt8 = 0
 
     var vmainc: UInt8 = 0       // $2115
     var vmaddl: UInt8 = 0       // $2116
@@ -191,6 +225,7 @@ final class PPU {
     private var pixelTraceTargets = [Int: PixelTraceTarget]()
     private var pixelTraceLogs = [String: [String]]()
     var gpuRenderingAvailable = false
+    var forceCPURendering = false
     private(set) var usesGPURenderingThisFrame = false
     private(set) var gpuLineStates = [GPULineState](repeating: GPULineState(), count: SNESConstants.screenHeight)
     private(set) var gpuSpriteCounts = [UInt32](repeating: 0, count: SNESConstants.screenHeight)
@@ -279,12 +314,13 @@ final class PPU {
         return logs
     }
 
-    private func appendPixelTrace(pixelIndex: Int, screenX: Int, message: String) {
+    @inline(__always)
+    private func appendPixelTrace(pixelIndex: Int, screenX: Int, message: @autoclosure () -> String) {
         guard !pixelTraceTargets.isEmpty else { return }
         let screenY = pixelIndex / SNESConstants.screenWidth
         let key = screenY * SNESConstants.screenWidth + screenX
         guard let target = pixelTraceTargets[key] else { return }
-        pixelTraceLogs[target.label, default: []].append(message)
+        pixelTraceLogs[target.label, default: []].append(message())
     }
 
     private func layerName(for layer: UInt8) -> String {
@@ -300,6 +336,237 @@ final class PPU {
         }
     }
 
+    @inline(__always)
+    private func bgScreenRegister(for bg: Int) -> UInt8? {
+        switch bg {
+        case 0: return bg1sc
+        case 1: return bg2sc
+        case 2: return bg3sc
+        case 3: return bg4sc
+        default: return nil
+        }
+    }
+
+    @inline(__always)
+    private func bgCharacterBase(for bg: Int) -> Int {
+        if bg < 2 {
+            return bg == 0 ? (Int(bg12nba & 0x0F) << 13) : (Int(bg12nba >> 4) << 13)
+        }
+        return bg == 2 ? (Int(bg34nba & 0x0F) << 13) : (Int(bg34nba >> 4) << 13)
+    }
+
+    @inline(__always)
+    private func bgTileSize(for bg: Int) -> Int {
+        (bgmode & (1 << (4 + bg))) != 0 ? 16 : 8
+    }
+
+    @inline(__always)
+    private func tilemapWord(scReg: UInt8, tileX: Int, tileY: Int) -> UInt16 {
+        var tmAddr = Int(scReg & 0xFC) << 9
+        if (tileX & 0x3F) >= 32 { tmAddr += 0x800 }
+        if (tileY & 0x3F) >= 32 {
+            let scSize = scReg & 0x03
+            if scSize == 2 {
+                tmAddr += 0x800
+            } else if scSize == 3 {
+                tmAddr += 0x1000
+            }
+        }
+        tmAddr += (((tileY & 0x1F) * 32) + (tileX & 0x1F)) * 2
+        return UInt16(vram[tmAddr & 0xFFFF]) | (UInt16(vram[(tmAddr + 1) & 0xFFFF]) << 8)
+    }
+
+    @inline(__always)
+    private func sampleBG4bpp(bg: Int, x: Int, y: Int) -> (colorIndex: Int, highPriority: Bool)? {
+        guard let scReg = bgScreenRegister(for: bg) else { return nil }
+
+        let tileSize = bgTileSize(for: bg)
+        let chrBase = bgCharacterBase(for: bg)
+
+        let tileX: Int
+        let tileY: Int
+        let subTileX: Int
+        let subTileY: Int
+
+        if tileSize == 16 {
+            tileX = (x / 16) & 0x3F
+            tileY = (y / 16) & 0x3F
+            subTileX = (x / 8) & 1
+            subTileY = (y / 8) & 1
+        } else {
+            tileX = (x / 8) & 0x3F
+            tileY = (y / 8) & 0x3F
+            subTileX = 0
+            subTileY = 0
+        }
+
+        let tileEntry = tilemapWord(scReg: scReg, tileX: tileX, tileY: tileY)
+        var tileNum = Int(tileEntry & 0x03FF)
+        let palette = Int((tileEntry >> 10) & 0x07)
+        let hFlip = (tileEntry & 0x4000) != 0
+        let vFlip = (tileEntry & 0x8000) != 0
+
+        if tileSize == 16 {
+            let sx = hFlip ? (1 - subTileX) : subTileX
+            let sy = vFlip ? (1 - subTileY) : subTileY
+            tileNum += sx + sy * 16
+        }
+
+        var fineY = y & 7
+        if vFlip { fineY = 7 - fineY }
+
+        let chrAddr = chrBase + tileNum * 32 + fineY * 2
+        let bp0 = vram[chrAddr & 0xFFFF]
+        let bp1 = vram[(chrAddr + 1) & 0xFFFF]
+        let bp2 = vram[(chrAddr + 16) & 0xFFFF]
+        let bp3 = vram[(chrAddr + 17) & 0xFFFF]
+        let pixelRowLow = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+        let pixelRowHigh = Self.bitplanePairPixelTable[Int(bp2) | (Int(bp3) << 8)]
+        let pixelRow = pixelRowLow | (pixelRowHigh &* 4)
+
+        let fineXBase = x & 7
+        let fineX = hFlip ? (7 - fineXBase) : fineXBase
+        let pixel = Self.pixelValue(pixelRow, fineX: fineX)
+        guard pixel != 0 else { return nil }
+
+        return ((palette << 4) + Int(pixel), (tileEntry & 0x2000) != 0)
+    }
+
+    @inline(__always)
+    private func mode2ScrollForPixel(bg: Int, screenX: Int, baseHScroll: Int, baseVScroll: Int) -> Mode2ScrollResult {
+        let bg3HScroll = Int(bgHScroll[2]) & 0x03FF
+        let bg3VScroll = Int(bgVScroll[2]) & 0x03FF
+        let visibleColumn = (screenX + (bg3HScroll & 0x07)) >> 3
+        guard visibleColumn > 0 else {
+            return .init(
+                hScroll: baseHScroll,
+                vScroll: baseVScroll,
+                horizontalEntry: 0,
+                verticalEntry: 0,
+                horizontalApplied: false,
+                verticalApplied: false
+            )
+        }
+
+        let entryColumn = (bg3HScroll >> 3) + visibleColumn - 1
+        let entryRow = bg3VScroll >> 3
+        let horizontalEntry = tilemapWord(scReg: bg3sc, tileX: entryColumn, tileY: entryRow)
+        let verticalEntry = tilemapWord(scReg: bg3sc, tileX: entryColumn, tileY: entryRow + 1)
+        let enableBit: UInt16 = bg == 0 ? 0x2000 : 0x4000
+
+        var hScroll = baseHScroll
+        var vScroll = baseVScroll
+        let horizontalApplied = (horizontalEntry & enableBit) != 0
+        let verticalApplied = (verticalEntry & enableBit) != 0
+        if horizontalApplied {
+            hScroll = Int(horizontalEntry & 0x03F8) | (baseHScroll & 0x07)
+        }
+        if verticalApplied {
+            vScroll = Int(verticalEntry & 0x03FF)
+        }
+        return .init(
+            hScroll: hScroll,
+            vScroll: vScroll,
+            horizontalEntry: horizontalEntry,
+            verticalEntry: verticalEntry,
+            horizontalApplied: horizontalApplied,
+            verticalApplied: verticalApplied
+        )
+    }
+
+    func debugSampleBG4bpp(bg: Int, screenX: Int, screenY: Int) -> DebugBG4bppSample? {
+        guard let scReg = bgScreenRegister(for: bg) else { return nil }
+
+        let baseHScroll = Int(bgHScroll[bg]) & 0x03FF
+        let baseVScroll = Int(bgVScroll[bg]) & 0x03FF
+        let scroll: Mode2ScrollResult
+        if (bgmode & 0x07) == 2 && bg < 2 {
+            scroll = mode2ScrollForPixel(bg: bg, screenX: screenX, baseHScroll: baseHScroll, baseVScroll: baseVScroll)
+        } else {
+            scroll = .init(
+                hScroll: baseHScroll,
+                vScroll: baseVScroll,
+                horizontalEntry: 0,
+                verticalEntry: 0,
+                horizontalApplied: false,
+                verticalApplied: false
+            )
+        }
+
+        let sampleX = screenX + scroll.hScroll
+        let sampleY = screenY + scroll.vScroll
+        let tileSize = bgTileSize(for: bg)
+        let chrBase = bgCharacterBase(for: bg)
+
+        let tileX: Int
+        let tileY: Int
+        let subTileX: Int
+        let subTileY: Int
+
+        if tileSize == 16 {
+            tileX = (sampleX / 16) & 0x3F
+            tileY = (sampleY / 16) & 0x3F
+            subTileX = (sampleX / 8) & 1
+            subTileY = (sampleY / 8) & 1
+        } else {
+            tileX = (sampleX / 8) & 0x3F
+            tileY = (sampleY / 8) & 0x3F
+            subTileX = 0
+            subTileY = 0
+        }
+
+        let tileEntry = tilemapWord(scReg: scReg, tileX: tileX, tileY: tileY)
+        var tileNumber = Int(tileEntry & 0x03FF)
+        let palette = Int((tileEntry >> 10) & 0x07)
+        let highPriority = (tileEntry & 0x2000) != 0
+        let hFlip = (tileEntry & 0x4000) != 0
+        let vFlip = (tileEntry & 0x8000) != 0
+
+        if tileSize == 16 {
+            let sx = hFlip ? (1 - subTileX) : subTileX
+            let sy = vFlip ? (1 - subTileY) : subTileY
+            tileNumber += sx + sy * 16
+        }
+
+        var fineY = sampleY & 7
+        if vFlip { fineY = 7 - fineY }
+
+        let chrAddr = chrBase + tileNumber * 32 + fineY * 2
+        let bp0 = vram[chrAddr & 0xFFFF]
+        let bp1 = vram[(chrAddr + 1) & 0xFFFF]
+        let bp2 = vram[(chrAddr + 16) & 0xFFFF]
+        let bp3 = vram[(chrAddr + 17) & 0xFFFF]
+        let pixelRowLow = Self.bitplanePairPixelTable[Int(bp0) | (Int(bp1) << 8)]
+        let pixelRowHigh = Self.bitplanePairPixelTable[Int(bp2) | (Int(bp3) << 8)]
+        let pixelRow = pixelRowLow | (pixelRowHigh &* 4)
+        let fineXBase = sampleX & 7
+        let fineX = hFlip ? (7 - fineXBase) : fineXBase
+        let pixel = Int(Self.pixelValue(pixelRow, fineX: fineX))
+
+        return .init(
+            bg: bg,
+            screenX: screenX,
+            screenY: screenY,
+            sampleX: sampleX,
+            sampleY: sampleY,
+            hScroll: scroll.hScroll,
+            vScroll: scroll.vScroll,
+            horizontalOffsetEntry: scroll.horizontalEntry,
+            verticalOffsetEntry: scroll.verticalEntry,
+            horizontalOffsetApplied: scroll.horizontalApplied,
+            verticalOffsetApplied: scroll.verticalApplied,
+            tileEntry: tileEntry,
+            tileNumber: tileNumber,
+            palette: palette,
+            highPriority: highPriority,
+            hFlip: hFlip,
+            vFlip: vFlip,
+            pixel: pixel,
+            colorIndex: (palette << 4) + pixel,
+            chrAddr: chrAddr & 0xFFFF
+        )
+    }
+
     private func spriteDimensions(isLarge: Bool) -> (width: Int, height: Int) {
         let sizeSelect = Int((objsel >> 5) & 0x07)
         let smallWidths = [8, 8, 8, 16, 16, 32, 16, 16]
@@ -313,9 +580,11 @@ final class PPU {
     }
 
     private func shouldUseGPURendering() -> Bool {
-        guard gpuRenderingAvailable else { return false }
+        guard gpuRenderingAvailable, !forceCPURendering else { return false }
         switch bgmode & 0x07 {
-        case 0, 1, 2, 3, 4, 5, 6, 7:
+        // The Metal shader only implements the composition rules for modes 0, 1, 3, and 7.
+        // Offset-per-tile/interlace modes still need the CPU renderer for correct output.
+        case 0, 1, 3, 7:
             return true
         default:
             return false
@@ -505,29 +774,32 @@ final class PPU {
         case 0x210C: bg34nba = value
 
         // BG scroll registers (write-twice)
-        // Each write: scroll = (new_value << 8) | previous_latch
-        // After two writes: high byte = second write, low byte = first write
+        // BGxHOFS keeps the low 3 bits from the previous horizontal write latch.
         case 0x210D:
-            bgHScroll[0] = (UInt16(value) << 8) | UInt16(scrollLatch)
+            bgHScroll[0] = (UInt16(value) << 8) | UInt16(scrollLatch & 0xF8) | UInt16(bghofsLatch & 0x07)
             scrollLatch = value
+            bghofsLatch = value
         case 0x210E:
             bgVScroll[0] = (UInt16(value) << 8) | UInt16(scrollLatch)
             scrollLatch = value
         case 0x210F:
-            bgHScroll[1] = (UInt16(value) << 8) | UInt16(scrollLatch)
+            bgHScroll[1] = (UInt16(value) << 8) | UInt16(scrollLatch & 0xF8) | UInt16(bghofsLatch & 0x07)
             scrollLatch = value
+            bghofsLatch = value
         case 0x2110:
             bgVScroll[1] = (UInt16(value) << 8) | UInt16(scrollLatch)
             scrollLatch = value
         case 0x2111:
-            bgHScroll[2] = (UInt16(value) << 8) | UInt16(scrollLatch)
+            bgHScroll[2] = (UInt16(value) << 8) | UInt16(scrollLatch & 0xF8) | UInt16(bghofsLatch & 0x07)
             scrollLatch = value
+            bghofsLatch = value
         case 0x2112:
             bgVScroll[2] = (UInt16(value) << 8) | UInt16(scrollLatch)
             scrollLatch = value
         case 0x2113:
-            bgHScroll[3] = (UInt16(value) << 8) | UInt16(scrollLatch)
+            bgHScroll[3] = (UInt16(value) << 8) | UInt16(scrollLatch & 0xF8) | UInt16(bghofsLatch & 0x07)
             scrollLatch = value
+            bghofsLatch = value
         case 0x2114:
             bgVScroll[3] = (UInt16(value) << 8) | UInt16(scrollLatch)
             scrollLatch = value
@@ -691,7 +963,8 @@ final class PPU {
     // Mode 0: BG4p0=1 BG3p0=2 OBJp0=3 BG4p1=4 BG3p1=5 OBJp1=6 BG2p0=7 BG1p0=8 OBJp2=9 BG2p1=10 BG1p1=11 OBJp3=12
     // Mode 1, bit3 clear: BG3p0=1 OBJp0=2 BG3p1=3 OBJp1=4 BG2p0=5 BG1p0=6 OBJp2=7 BG2p1=8 BG1p1=9 OBJp3=10
     // Mode 1, bit3 set:   BG3p0=1 OBJp0=2 OBJp1=3 BG2p0=4 BG1p0=5 OBJp2=6 BG2p1=7 BG1p1=8 OBJp3=9 BG3p1=10
-    // Mode 3+: BG2p0=1 BG1p0=2 OBJp0=3 OBJp1=4 BG2p1=5 BG1p1=6 OBJp2=7 OBJp3=8
+    // Mode 2/3/4/5: BG2p0=1 OBJp0=2 BG1p0=3 OBJp1=4 BG2p1=5 OBJp2=6 BG1p1=7 OBJp3=8
+    // Mode 6: OBJp0=1 BG1p0=2 OBJp1=3 OBJp2=4 BG1p1=5 OBJp3=6
 
     private func renderLayers(mode: UInt8, layerMask: UInt8, hasOBJ: Bool, scanline y: Int) {
         switch mode {
@@ -717,12 +990,19 @@ final class PPU {
             }
         case 3:
             if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 1, zOrder1: 5) }
-            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG8bpp(bg: 0, scanline: y, zOrder0: 2, zOrder1: 6) }
-            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (3, 4, 7, 8)) }
-        case 2, 4, 5, 6:
+            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG8bpp(bg: 0, scanline: y, zOrder0: 3, zOrder1: 7) }
+            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 4, 6, 8)) }
+        case 2:
+            if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBGMode2(bg: 1, scanline: y, zOrder0: 1, zOrder1: 5) }
+            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBGMode2(bg: 0, scanline: y, zOrder0: 3, zOrder1: 7) }
+            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 4, 6, 8)) }
+        case 4, 5:
             if (layerMask & 0x02) != 0 { _currentLayer = 2; renderBG4bpp(bg: 1, scanline: y, zOrder0: 1, zOrder1: 5) }
-            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 2, zOrder1: 6) }
-            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (3, 4, 7, 8)) }
+            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 3, zOrder1: 7) }
+            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (2, 4, 6, 8)) }
+        case 6:
+            if (layerMask & 0x01) != 0 { _currentLayer = 1; renderBG4bpp(bg: 0, scanline: y, zOrder0: 2, zOrder1: 5) }
+            if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (1, 3, 4, 6)) }
         case 7:
             if (layerMask & 0x01) != 0 { _currentLayer = 1; renderMode7(scanline: y) }
             if hasOBJ { _currentLayer = 5; renderSprites(scanline: y, zOrders: (1, 2, 3, 4)) }
@@ -807,26 +1087,32 @@ final class PPU {
         }
     }
 
-    private func renderBG4bpp(bg: Int, scanline: Int, tilePriority: Int? = nil, zOrder0: UInt8 = 1, zOrder1: UInt8 = 2) {
-        let scReg: UInt8
-        switch bg {
-        case 0: scReg = bg1sc
-        case 1: scReg = bg2sc
-        case 2: scReg = bg3sc
-        case 3: scReg = bg4sc
-        default: return
+    private func renderBGMode2(bg: Int, scanline: Int, zOrder0: UInt8 = 1, zOrder1: UInt8 = 2) {
+        let baseHScroll = Int(bgHScroll[bg]) & 0x03FF
+        let baseVScroll = Int(bgVScroll[bg]) & 0x03FF
+        let lineOffset = scanline * SNESConstants.screenWidth
+
+        for screenX in 0..<SNESConstants.screenWidth {
+            let scroll = mode2ScrollForPixel(bg: bg, screenX: screenX, baseHScroll: baseHScroll, baseVScroll: baseVScroll)
+            let sampleX = screenX + scroll.hScroll
+            let sampleY = scanline + scroll.vScroll
+            guard let sample = sampleBG4bpp(bg: bg, x: sampleX, y: sampleY) else { continue }
+
+            writePixel(
+                lineOffset + screenX,
+                screenX,
+                color: cgramColorCache[sample.colorIndex],
+                z: sample.highPriority ? zOrder1 : zOrder0
+            )
         }
+    }
+
+    private func renderBG4bpp(bg: Int, scanline: Int, tilePriority: Int? = nil, zOrder0: UInt8 = 1, zOrder1: UInt8 = 2) {
+        guard let scReg = bgScreenRegister(for: bg) else { return }
 
         let tilemapBase = Int(scReg & 0xFC) << 9  // word→byte: SC gives word addr, vram[] is byte-indexed
-        let tileSize = (bgmode & (1 << (4 + bg))) != 0 ? 16 : 8
-
-        // Chr base: each nibble = 4K words = 8KB bytes
-        let chrBase: Int
-        if bg < 2 {
-            chrBase = bg == 0 ? (Int(bg12nba & 0x0F) << 13) : (Int(bg12nba >> 4) << 13)
-        } else {
-            chrBase = bg == 2 ? (Int(bg34nba & 0x0F) << 13) : (Int(bg34nba >> 4) << 13)
-        }
+        let tileSize = bgTileSize(for: bg)
+        let chrBase = bgCharacterBase(for: bg)
 
         let hScroll = Int(bgHScroll[bg]) & 0x3FF
         let vScroll = Int(bgVScroll[bg]) & 0x3FF
@@ -1494,36 +1780,30 @@ final class PPU {
 
     /// Returns true if the pixel at screenX should be masked (hidden) for the given layer.
     /// layer: 1-4 = BG1-BG4, 5 = OBJ (matches _currentLayer values)
+    /// The caller is responsible for checking whether the current screen enables
+    /// window masking for this layer via TMW or TSW.
     private func isWindowMasked(layer: Int, screenX: Int) -> Bool {
         let w12raw: UInt8
         let wLog: UInt8
-        let tmwBit: Bool
 
         switch layer {
         case 1: // BG1
             w12raw = w12sel
             wLog = wbglog & 0x03
-            tmwBit = (tmw & 0x01) != 0
         case 2: // BG2
             w12raw = w12sel >> 4
             wLog = (wbglog >> 2) & 0x03
-            tmwBit = (tmw & 0x02) != 0
         case 3: // BG3
             w12raw = w34sel
             wLog = (wbglog >> 4) & 0x03
-            tmwBit = (tmw & 0x04) != 0
         case 4: // BG4
             w12raw = w34sel >> 4
             wLog = (wbglog >> 6) & 0x03
-            tmwBit = (tmw & 0x08) != 0
         case 5: // OBJ
             w12raw = wobjsel
             wLog = wobjlog & 0x03
-            tmwBit = (tmw & 0x10) != 0
         default: return false
         }
-
-        guard tmwBit else { return false }
 
         let x = screenX
 
@@ -1637,6 +1917,76 @@ final class PPU {
         return (buffer[idx], buffer[idx + 1], buffer[idx + 2])
     }
 
+    func debugRenderLayerFrame(layerMask: UInt8, subScreen: Bool = false) -> [UInt32] {
+        let savedBackBuffer = backBuffer
+        let savedBackBuffer32 = backBuffer32
+        let savedPixelZ = pixelZ
+        let savedMainLayerLine = mainLayerLine
+        let savedSubLayerLine = subLayerLine
+        let savedRenderingSubScreen = _renderingSubScreen
+        let savedCurrentLayer = _currentLayer
+
+        let tempRaw = UnsafeMutableRawBufferPointer.allocate(
+            byteCount: fbSize,
+            alignment: MemoryLayout<UInt32>.alignment
+        )
+        tempRaw.initializeMemory(as: UInt8.self, repeating: 0)
+        let temp32 = tempRaw.bindMemory(to: UInt32.self)
+
+        backBuffer = tempRaw
+        backBuffer32 = temp32
+        pixelZ = [UInt8](repeating: 0, count: SNESConstants.screenWidth)
+        mainLayerLine = [UInt8](repeating: 0, count: SNESConstants.screenWidth)
+        subLayerLine = [UInt8](repeating: 0, count: SNESConstants.screenWidth)
+
+        defer {
+            backBuffer = savedBackBuffer
+            backBuffer32 = savedBackBuffer32
+            pixelZ = savedPixelZ
+            mainLayerLine = savedMainLayerLine
+            subLayerLine = savedSubLayerLine
+            _renderingSubScreen = savedRenderingSubScreen
+            _currentLayer = savedCurrentLayer
+            tempRaw.deallocate()
+        }
+
+        let mode = bgmode & 0x07
+        for y in 0..<SNESConstants.screenHeight {
+            let lineOffset = y * SNESConstants.screenWidth
+            for x in 0..<SNESConstants.screenWidth {
+                backBuffer32[lineOffset + x] = 0
+                pixelZ[x] = 0
+                mainLayerLine[x] = 0
+                subLayerLine[x] = 0
+            }
+
+            _renderingSubScreen = subScreen
+            let hasOBJ = (layerMask & 0x10) != 0
+            renderLayers(mode: mode, layerMask: layerMask, hasOBJ: hasOBJ, scanline: y)
+        }
+
+        return Array(temp32)
+    }
+
+    func capturePresentedFramebuffer() -> [UInt8] {
+        [UInt8](frontBuffer)
+    }
+
+    @discardableResult
+    func restorePresentedFramebuffer(_ framebuffer: [UInt8]) -> Bool {
+        guard framebuffer.count == frontBuffer.count else { return false }
+        return framebuffer.withUnsafeBytes { bytes in
+            guard let source = bytes.baseAddress,
+                  let frontDestination = frontBuffer.baseAddress,
+                  let backDestination = backBuffer.baseAddress else {
+                return false
+            }
+            memcpy(frontDestination, source, frontBuffer.count)
+            memcpy(backDestination, source, backBuffer.count)
+            return true
+        }
+    }
+
     // MARK: - Frame management
 
     func swapBuffers() {
@@ -1647,6 +1997,7 @@ final class PPU {
     func captureSnapshot() -> Snapshot {
         Snapshot(
             scrollLatch: scrollLatch,
+            bghofsLatch: bghofsLatch,
             vramPrefetch: vramPrefetch,
             fixedColorR: fixedColorR,
             fixedColorG: fixedColorG,
@@ -1663,6 +2014,7 @@ final class PPU {
 
     func restoreSnapshot(_ snapshot: Snapshot) {
         scrollLatch = snapshot.scrollLatch
+        bghofsLatch = snapshot.bghofsLatch
         vramPrefetch = snapshot.vramPrefetch
         fixedColorR = snapshot.fixedColorR
         fixedColorG = snapshot.fixedColorG

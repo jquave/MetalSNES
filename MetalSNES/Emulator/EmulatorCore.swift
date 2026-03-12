@@ -22,6 +22,11 @@ final class EmulatorCore {
 
     /// Debug pause: when > 0, emulation loop spins (no frames) and decrements.
     var _pauseFrames = OSAllocatedUnfairLock(initialState: 0)
+    var cpuMasterCycleCarry = 0
+
+    var completedFrames: UInt64 {
+        frameCount
+    }
 
     /// Call from main thread to request a freeze diagnostic on the next scanline.
     func requestDiagnosis() {
@@ -62,6 +67,8 @@ final class EmulatorCore {
     func stopDebugServer() {
         debugServer?.stop()
         debugServer = nil
+        bus.captureCPUWriteLog = false
+        bus.cpuWriteLog.removeAll(keepingCapacity: false)
     }
 
     func run() {
@@ -155,6 +162,28 @@ final class EmulatorCore {
         runFrame(presentFrame: true, outputAudio: true, emitDiagnostics: true)
     }
 
+    func runDebugFrames(_ frames: Int) {
+        guard frames > 0 else { return }
+        for _ in 0..<frames {
+            runFrame(presentFrame: true, outputAudio: false, emitDiagnostics: true)
+            frameCount += 1
+        }
+        if debugSnapshotsEnabled {
+            updateDebugState()
+        }
+    }
+
+    func runBenchmarkFrames(_ frames: Int, outputAudio: Bool) {
+        guard frames > 0 else { return }
+        for _ in 0..<frames {
+            runFrame(presentFrame: true, outputAudio: outputAudio, emitDiagnostics: false)
+            frameCount += 1
+        }
+        if debugSnapshotsEnabled {
+            updateDebugState()
+        }
+    }
+
     /// Run a fixed number of frames with no frame pacing and report FPS.
     func benchmark(frames: Int) {
         var cpuTime: UInt64 = 0
@@ -173,19 +202,25 @@ final class EmulatorCore {
 
                 // CPU + SPC timing (interleaved)
                 let cpuStart = mach_absolute_time()
-                var cyclesRemaining = Timing.cpuCyclesPerScanline
+                let scanlineMasterBudget = Int(SNESConstants.masterCyclesPerScanline)
+                var hMasterCycles = 0
                 var spcCycleDebt: Double = 0.0
                 let spcRatio = APU.spcCyclesPerScanline / Double(Timing.cpuCyclesPerScanline)
                 let spc = bus.apu.spc700
-                while cyclesRemaining > 0 {
-                    let cycles = cpu.step()
-                    cyclesRemaining -= cycles
-                    spcCycleDebt += Double(cycles) * spcRatio
-                    while spcCycleDebt >= 1.0 {
-                        let spcCycles = spc.step()
-                        spc.tickTimers(cpuCycles: spcCycles)
-                        spcCycleDebt -= Double(spcCycles)
+                while hMasterCycles < scanlineMasterBudget {
+                    if let superFX = bus.superFX, superFX.irqActive {
+                        cpu.regs.irqPending = true
                     }
+                    let cycles = cpu.step()
+                    let masterCycles = cycles * Int(SNESConstants.cpuDivider) + bus.consumePendingMasterCyclePenalty()
+                    hMasterCycles += masterCycles
+                    advanceCoprocessors(
+                        masterCycles: masterCycles,
+                        spcRatio: spcRatio,
+                        spc: spc,
+                        outputAudio: false,
+                        spcCycleDebt: &spcCycleDebt
+                    )
                 }
                 cpuTime += mach_absolute_time() - cpuStart
 
@@ -267,6 +302,28 @@ final class EmulatorCore {
         }
     }
 
+    private func advanceCoprocessors(masterCycles: Int,
+                                     spcRatio: Double,
+                                     spc: SPC700,
+                                     outputAudio: Bool,
+                                     spcCycleDebt: inout Double) {
+        guard masterCycles > 0 else { return }
+
+        bus.superFX?.run(masterCycles: masterCycles)
+        if let superFX = bus.superFX, superFX.irqActive {
+            cpu.regs.irqPending = true
+        }
+
+        let cpuEquivalentCycles = Double(masterCycles) / Double(SNESConstants.cpuDivider)
+        spcCycleDebt += cpuEquivalentCycles * spcRatio
+        while spcCycleDebt >= 1.0 {
+            let spcCycles = spc.step()
+            spc.tickTimers(cpuCycles: spcCycles)
+            bus.apu.runSPCCycles(spcCycles, outputAudio: outputAudio)
+            spcCycleDebt -= Double(spcCycles)
+        }
+    }
+
     private func runFrame(presentFrame: Bool, outputAudio: Bool, emitDiagnostics: Bool) {
         bus.ppu.gpuRenderingAvailable = renderer?.supportsPPURendering ?? false
         for scanline in 0..<SNESConstants.scanlinesPerFrame {
@@ -275,6 +332,9 @@ final class EmulatorCore {
             if presentFrame, scanline == SNESConstants.visibleScanlines - 1 {
                 presentCompletedFrame()
             }
+        }
+        if outputAudio {
+            bus.apu.flushAudio()
         }
     }
 
@@ -296,19 +356,21 @@ final class EmulatorCore {
             bus.hvbjoy &= ~0x01
         }
 
-        // Run CPU for approximately one scanline worth of cycles
-        // SPC700 runs interleaved: ~65 SPC cycles per ~228 CPU cycles
-        var cyclesRemaining = Timing.cpuCyclesPerScanline
+        // Run CPU for one scanline worth of master cycles, carrying
+        // any instruction overrun into the next scanline.
+        let scanlineMasterBudget = Int(SNESConstants.masterCyclesPerScanline)
         let irqMode = (bus.nmitimen >> 4) & 0x03
-        var hDot = 0
-        let dotsPerCycle = 4
+        var hMasterCycles = min(max(cpuMasterCycleCarry, 0), scanlineMasterBudget - 1)
         var spcCycleDebt: Double = 0.0
         let spcRatio = APU.spcCyclesPerScanline / Double(Timing.cpuCyclesPerScanline)
         let spc = bus.apu.spc700
 
         // Start of scanline: clear HBlank
         bus.hvbjoy &= ~0x40
-        bus.ppu.setBeamPosition(hDot: 0, scanline: scanline)
+        bus.ppu.setBeamPosition(
+            hDot: min(hMasterCycles / Int(SNESConstants.masterCyclesPerDot), SNESConstants.dotsPerScanline - 1),
+            scanline: scanline
+        )
 
         // On-demand freeze diagnostic (triggered by Diagnose button)
         let tracing = emitDiagnostics ? _diagRequested.withLock { val -> Bool in
@@ -316,7 +378,8 @@ final class EmulatorCore {
         } : false
         var traceBuffer: [(UInt32, UInt8)] = []
 
-        while cyclesRemaining > 0 {
+        while hMasterCycles < scanlineMasterBudget {
+            let hDot = min(hMasterCycles / SNESConstants.masterCyclesPerDot, SNESConstants.dotsPerScanline - 1)
             bus.ppu.setBeamPosition(hDot: hDot, scanline: scanline)
 
             if tracing {
@@ -325,27 +388,29 @@ final class EmulatorCore {
                 traceBuffer.append((pc, opcode))
             }
 
+            if let superFX = bus.superFX, superFX.irqActive {
+                cpu.regs.irqPending = true
+            }
             let cycles = cpu.step()
-            cyclesRemaining -= cycles
-            hDot += cycles * dotsPerCycle
+            let masterCycles = cycles * Int(SNESConstants.cpuDivider) + bus.consumePendingMasterCyclePenalty()
+            advanceCoprocessors(
+                masterCycles: masterCycles,
+                spcRatio: spcRatio,
+                spc: spc,
+                outputAudio: outputAudio,
+                spcCycleDebt: &spcCycleDebt
+            )
+            hMasterCycles += masterCycles
+            let hDotAfter = min(hMasterCycles / SNESConstants.masterCyclesPerDot, SNESConstants.dotsPerScanline - 1)
 
             // HBlank flag (bit 6 of $4212): set when H >= 274, clear when H < 274
-            if hDot >= 274 {
+            if hDotAfter >= 274 {
                 bus.hvbjoy |= 0x40
-            }
-
-            // Run proportional SPC cycles interleaved with CPU
-            spcCycleDebt += Double(cycles) * spcRatio
-            while spcCycleDebt >= 1.0 {
-                let spcCycles = spc.step()
-                spc.tickTimers(cpuCycles: spcCycles)
-                bus.apu.runSPCCycles(spcCycles, outputAudio: outputAudio)
-                spcCycleDebt -= Double(spcCycles)
             }
 
             // Check H-IRQ mid-scanline (only when IRQ enabled)
             if irqMode != 0 && !irqFiredThisScanline {
-                checkTimerIRQ(scanline: scanline, hDot: hDot)
+                checkTimerIRQ(scanline: scanline, hDot: hDotAfter)
             }
 
             if cpu.regs.stopped {
@@ -354,6 +419,7 @@ final class EmulatorCore {
                 return
             }
         }
+        cpuMasterCycleCarry = max(hMasterCycles - scanlineMasterBudget, 0)
 
         if tracing && !traceBuffer.isEmpty {
             print("=== FREEZE DIAGNOSTIC (frame \(frameCount), scanline \(scanline)) ===")
@@ -428,7 +494,14 @@ final class EmulatorCore {
     }
 
     func step() {
-        _ = cpu.step()
+        if let superFX = bus.superFX, superFX.irqActive {
+            cpu.regs.irqPending = true
+        }
+        let cycles = cpu.step()
+        bus.superFX?.run(masterCycles: cycles * Int(SNESConstants.cpuDivider))
+        if let superFX = bus.superFX, superFX.irqActive {
+            cpu.regs.irqPending = true
+        }
     }
 
     private func presentCompletedFrame() {

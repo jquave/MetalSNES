@@ -29,31 +29,41 @@ The following were identified and fixed:
 
 The emulator now has a real SPC700, DSP, and audio output path, and recent fixes removed several hard failures (`POP` flags, `SLEEP/STOP` idle semantics, half-rate SPC scheduling). Audio is still not cycle-accurate, so tempo, envelopes, pitch modulation, and game-specific behavior still need hardware-accuracy validation.
 
-### 2. Modes 2/4/5/6 are still simplified
+### 2. Super FX support is only a first pass
+**Files:** `Cartridge.swift`, `Bus.swift`, `EmulatorCore.swift`, `SuperFX.swift`, `superfx.cpp`
+**Severity:** High
+
+Star Fox now loads and runs through real benchmarked frames, but this is still an early integration:
+- save states now serialize and restore Super FX correctly, but run-ahead is still intentionally disabled for Super FX carts,
+- the GSU path currently targets Star Fox / first-pass compatibility rather than cycle-accurate coprocessor behavior,
+- the earlier blue-planet frozen save-state now recovers with the beam-timing fixes, but Star Fox still needs broader gameplay validation beyond that recovered path,
+- and broader Super FX board coverage and hardware validation still need more work.
+
+### 3. Modes 2/4/5/6 are still simplified
 **File:** `PPU.swift`
 **Severity:** Medium
 
 Modes 2/4/5/6 are not yet modeled with their real per-mode behavior. Offset-per-tile, hi-res details, and mode-specific differences are still incomplete.
 
-### 3. Window clipping is stored but not applied
+### 4. Window and color-window behavior still need an accuracy pass
 **File:** `PPU.swift`
 **Severity:** Medium
 
-Window registers (`W12SEL`, `W34SEL`, `WOBJSEL`, `WH0-WH3`, `WBGLOG`, `WOBJLOG`, `TMW`, `TSW`) are tracked, but the masking rules are not used during rendering.
+Layer window masking is now applied in the renderer, including sub-screen masking. The remaining gap is hardware-accurate behavior for all color-window combinations and exact per-layer interactions.
 
-### 4. Color math is present but still not hardware-accurate
+### 5. Color math is present but still not hardware-accurate
 **File:** `PPU.swift`
 **Severity:** Medium
 
-`CGWSEL`, `CGADSUB`, `COLDATA`, and the sub-screen path are implemented, but window-gated color math and exact per-layer/subscreen rules still need a hardware-accuracy pass.
+`CGWSEL`, `CGADSUB`, `COLDATA`, and the sub-screen path are implemented, but exact per-layer/subscreen rules still need a hardware-accuracy pass.
 
-### 5. Mosaic is not applied
+### 6. Mosaic is not applied
 **File:** `PPU.swift`
 **Severity:** Low
 
 The MOSAIC register is stored, but the blocky pixel expansion effect is not currently rendered.
 
-### 6. CGRAM read behavior could still use a hardware-accuracy pass
+### 7. CGRAM read behavior could still use a hardware-accuracy pass
 **File:** `PPU.swift`
 **Severity:** Low
 

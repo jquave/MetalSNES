@@ -2,5 +2,6 @@
 #define MetalSNES_Bridging_Header_h
 
 #include "cpu_dispatch.h"
+#include "superfx.h"
 
 #endif

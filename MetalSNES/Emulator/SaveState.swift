@@ -4,7 +4,7 @@ import Foundation
 /// Format: "MSNS" magic + version u32 + sequential component data.
 final class SaveState {
     static let magic: UInt32 = 0x534E534D  // "MSNS"
-    static let version: UInt32 = 4
+    static let version: UInt32 = 8
 
     // MARK: - Writer
 
@@ -83,7 +83,7 @@ final class SaveState {
 
     func save(core: EmulatorCore) -> Data {
         data.removeAll(keepingCapacity: true)
-        data.reserveCapacity(450_000)
+        data.reserveCapacity(700_000)
         write32(SaveState.magic)
         write32(SaveState.version)
 
@@ -95,6 +95,8 @@ final class SaveState {
         saveDMA(core.bus.dma)
         saveAPU(core.bus.apu)
         saveJoypad(core.bus.joypad)
+        saveSuperFX(core.bus.superFX)
+        saveRuntimeState(core)
 
         return data
     }
@@ -158,12 +160,14 @@ final class SaveState {
 
         let snapshot = ppu.captureSnapshot()
         write8(snapshot.scrollLatch)
+        write8(snapshot.bghofsLatch)
         write16(snapshot.vramPrefetch)
         write8(snapshot.fixedColorR); write8(snapshot.fixedColorG); write8(snapshot.fixedColorB)
         write16(snapshot.oamAddr); write8(snapshot.oamLatch)
         write16(snapshot.cgramAddr); write8(snapshot.cgramLatch); writeBool(snapshot.cgramFlipFlop)
         write8(snapshot.m7Latch)
         writeS32(snapshot.mpyResult)
+        writeData(ppu.capturePresentedFramebuffer())
     }
 
     private func saveSPC(_ spc: SPC700) {
@@ -259,6 +263,19 @@ final class SaveState {
         write32(UInt32(snapshot.joy1ReadCount))
     }
 
+    private func saveSuperFX(_ superFX: SuperFXChip?) {
+        guard let superFX else {
+            writeBool(false)
+            return
+        }
+        writeBool(true)
+        writeData(superFX.saveState())
+    }
+
+    private func saveRuntimeState(_ core: EmulatorCore) {
+        write32(UInt32(core.cpuMasterCycleCarry))
+    }
+
     // MARK: - Restore
 
     func restore(from fileData: Data, core: EmulatorCore) throws {
@@ -287,6 +304,16 @@ final class SaveState {
         } else {
             core.bus.apu.restoreSnapshot(.init())
             core.bus.joypad.restoreSnapshot(.init())
+        }
+        if loadedVersion >= 5 {
+            try restoreSuperFX(core.bus.superFX)
+        } else if core.bus.superFX != nil {
+            throw SaveStateError.missingCoprocessorState("Super FX")
+        }
+        if loadedVersion >= 7 {
+            restoreRuntimeState(core)
+        } else {
+            core.cpuMasterCycleCarry = 0
         }
     }
 
@@ -343,8 +370,11 @@ final class SaveState {
         ppu.tmw = read8(); ppu.tsw = read8()
 
         if loadedVersion >= 4 {
+            let scrollLatch = read8()
+            let bghofsLatch = loadedVersion >= 8 ? read8() : scrollLatch
             ppu.restoreSnapshot(.init(
-                scrollLatch: read8(),
+                scrollLatch: scrollLatch,
+                bghofsLatch: bghofsLatch,
                 vramPrefetch: read16(),
                 fixedColorR: read8(),
                 fixedColorG: read8(),
@@ -359,6 +389,9 @@ final class SaveState {
             ))
         } else {
             ppu.restoreSnapshot(.init())
+        }
+        if loadedVersion >= 6 {
+            _ = ppu.restorePresentedFramebuffer(readDataChunk())
         }
     }
 
@@ -440,6 +473,10 @@ final class SaveState {
         }
     }
 
+    private func restoreRuntimeState(_ core: EmulatorCore) {
+        core.cpuMasterCycleCarry = Int(read32())
+    }
+
     private func restoreDMA(_ dma: DMA) {
         for i in 0..<8 {
             dma.channels[i].control = read8(); dma.channels[i].destReg = read8()
@@ -474,13 +511,36 @@ final class SaveState {
         ))
     }
 
+    private func restoreSuperFX(_ superFX: SuperFXChip?) throws {
+        let hasSuperFXState = readBool()
+        guard hasSuperFXState else {
+            if superFX != nil {
+                throw SaveStateError.coprocessorMismatch("Super FX")
+            }
+            return
+        }
+        guard let superFX else {
+            throw SaveStateError.coprocessorMismatch("Super FX")
+        }
+        let state = readDataChunk()
+        guard superFX.restoreState(state) else {
+            throw SaveStateError.invalidCoprocessorState("Super FX")
+        }
+    }
+
     enum SaveStateError: Error, LocalizedError {
         case invalidMagic
         case versionMismatch
+        case missingCoprocessorState(String)
+        case coprocessorMismatch(String)
+        case invalidCoprocessorState(String)
         var errorDescription: String? {
             switch self {
             case .invalidMagic: return "Not a valid save state file"
             case .versionMismatch: return "Save state version mismatch"
+            case .missingCoprocessorState(let name): return "Save state is missing \(name) data"
+            case .coprocessorMismatch(let name): return "Save state \(name) data does not match the loaded ROM"
+            case .invalidCoprocessorState(let name): return "Failed to restore \(name) state"
             }
         }
     }

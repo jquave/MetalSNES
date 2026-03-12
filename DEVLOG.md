@@ -1,5 +1,471 @@
 # MetalSNES Development Log
 
+## 2026-03-12: Star Fox Live Performance Regression Check
+
+### Findings
+- The new slowdown report does not line up with an always-on console logging bug.
+- `EmulatorCore.debugLogging` is still off by default, and the real Star Fox save state remains fast in headless Release benchmarking:
+  - `--benchmark-state-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 120`
+    -> `161.5 FPS`
+- I added a reusable live-audio benchmark path to measure the app execution profile more honestly:
+  - `--benchmark-state-live-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 120`
+    -> `162.4 FPS`
+  - so the post-DMA-timing regression is not coming from “SPC/audio now runs during DMA stalls” in the core itself.
+- A real sampled GUI run using:
+  - `MetalSNES --rom "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" --state "/Users/macos/src/MetalSNES/Star Fox (USA).state"`
+  showed:
+  - the main thread spending most of its sampled time blocked in `MTKView.currentDrawable` / `CAMetalLayer.nextDrawable`,
+  - the emulation thread still spending its real work in CPU PPU mode-2 rendering (`PPU.renderBGMode2(...)`, `PPU.writePixel(...)`),
+  - no meaningful sample concentration in debug-server code, CPU-write logging, or `print`.
+- There was still one real app-only debug cost left on by default:
+  - normal GUI sessions always started the HTTP debug server,
+  - which also turned on `Bus.captureCPUWriteLog`.
+  - That was unnecessary for normal play even if it was not the dominant sampled hotspot on this machine.
+
+### Changes
+- Normal GUI emulation no longer auto-starts the debug server.
+- The debug server now starts only when the debug UI is enabled, or when explicit headless `--serve-rom` / `--serve-state` modes are used.
+- Stopping the debug server now also disables CPU write capture and clears the retained write-log buffer.
+- Added reusable live-audio state benchmarking:
+  - `--benchmark-state-live <rom> <state> [frames]`
+  - `--benchmark-state-live-gpu <rom> <state> [frames]`
+- Batched APU sample delivery into the audio ring buffer so normal audio output does one lock/unlock per sample batch instead of per generated sample.
+
+### Validation
+- Release build succeeded.
+- Headless Release benchmark on the exact user Star Fox state:
+  - `--benchmark-state-gpu ... 120` -> `161.5 FPS`
+- Live-audio Release benchmark on the same state:
+  - `--benchmark-state-live-gpu ... 120` -> `162.4 FPS`
+  - audio stats after the run: buffer filled as expected while benchmarking faster than realtime (`buffered=16383`, large overrun count, zero underruns).
+- Real GUI sampling from the same ROM/state showed the window thread pacing on drawable acquisition, not spinning in logging or debug-server code.
+
+### Remaining
+- I still have not reproduced the user-observed “about 1 FPS” window behavior on this machine after removing the auto debug server path.
+- If that persists for the user after this build, the next investigation target is display-path specific:
+  - current display filter/profile,
+  - drawable pacing / frame presentation,
+  - or scene-specific CPU PPU cost in mode 2.
+
+## 2026-03-12: Audio Popping Follow-up
+
+### Findings
+- After the performance fix, the remaining user complaint was intermittent audio popping while framerate stayed solid.
+- The first low-risk place to tighten was buffer behavior, not emulation timing:
+  - the audio ring buffer was relatively small for a desktop app (`16384` samples/channel),
+  - and on overrun it discarded the oldest queued samples, which can create an audible discontinuity because playback effectively jumps forward.
+
+### Changes
+- Increased audio ring-buffer headroom:
+  - `bufferSize`: `16384 -> 32768`
+  - `prebufferSamples`: `1024 -> 1536`
+- Changed overrun handling so the audio queue now preserves already-buffered continuity and drops incoming samples when full instead of discarding the oldest queued audio.
+
+### Validation
+- Release build succeeded after the audio-buffer change.
+- Live-audio Release benchmark on the exact Star Fox state remained healthy:
+  - `--benchmark-state-live-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 120`
+    -> `160.8 FPS`
+  - audio stats in that faster-than-realtime benchmark:
+    - `buffered=32767`
+    - `underruns=0`
+    - `overruns=16882`
+- The overrun count there is expected because the benchmark intentionally runs far faster than realtime; the point of the change is preserving continuity in the live paced app when the producer briefly gets ahead.
+
+## 2026-03-12: Star Fox Super FX DMA Timing Fix
+
+### Findings
+- The remaining Star Fox city/frame corruption was no longer pointing at final PPU composition.
+- The reusable layer dumps showed the bad art was already inside `BG1`, and the CPU write log on the same scripted state transition showed why:
+  - the game was DMA-copying large chunks from Super FX RAM in bank `$70` into VRAM (`$2118/$2119`),
+  - so the visible garbage had to be wrong before the PPU ever sampled the tiles.
+- On the exact `state -> run 1 frame -> Start -> run 30 frames` canary, the CPU write log included two large VRAM blits:
+  - `70:2C00 -> VRAM $0000`, size `$2A00`
+  - `70:5600 -> VRAM $1500`, size `$2A00`
+- Our timing model was still giving those DMA transfers zero duration:
+  - `$420B` executed the copy immediately inside `Bus.writeSystemBank(...)`,
+  - but the main loop only advanced Super FX and SPC time when the CPU executed instructions.
+- For Star Fox, that means the GSU was being starved exactly while the CPU was blitting its framebuffer into VRAM, which is a credible cause of partially rendered or stale bitmap scenes.
+
+### Changes
+- `DMA.executeGeneralDMA(...)` now returns a coarse master-cycle charge based on active channels plus bytes transferred.
+- `Bus` now accumulates that DMA penalty when `$420B` starts a transfer.
+- `EmulatorCore` now consumes that pending master-cycle penalty after each CPU step and advances:
+  - Super FX time,
+  - SPC time,
+  - and scanline/master-cycle position
+  through the same stall window instead of pretending DMA was free.
+- The headless benchmark loop now uses the same coprocessor-advance path, so benchmark timing matches the normal run loop more closely.
+
+### Validation
+- Release and Debug builds both succeeded after the timing change.
+- Re-ran the exact user canary on the Release build:
+  - load `/Users/macos/src/MetalSNES/Star Fox (USA).state`
+  - run `1` frame
+  - press `Start`
+  - run `30` frames
+- Result: the later static city frame materially improved.
+  - Before: the `BOMBED` text and nearby BG1 tiles were visibly garbled.
+  - After: `BOMBED` is readable and the scene is noticeably cleaner.
+- Release state benchmark remains healthy:
+  - `--benchmark-state-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 120`
+    -> `172.2 FPS`
+
+### Remaining
+- The original save state's first restored city frame is still visibly bad after only `1` frame.
+- That is now more likely to be stale/corrupted GSU RAM already baked into that older save state than a live PPU bug, because the next scene loaded through fresh GSU->VRAM DMA is clearly improved on the fixed build.
+- General DMA timing is now modeled; HDMA timing is still simplified and may still matter for later Star Fox cleanup.
+
+## 2026-03-12: Star Fox Briefing Artifacts Investigation
+
+### Findings
+- The current `/Users/macos/src/MetalSNES/Star Fox (USA).state` is not a clean gameplay state; it restores into a mostly static briefing/city scene and, after a scripted `Start` press through the debug server, advances into a different but still static `BOMBED` city frame.
+- Two obvious PPU accuracy gaps were real:
+  - mode 2 was still using the plain tiled BG path with no offset-per-tile support,
+  - and `BGxHOFS/BGxVOFS` writes still used the wrong shared-latch formula.
+- Neither of those fixes materially changed the restored city image on this state:
+  - the loaded briefing frame remained visually the same after rerunning,
+  - and the later `BOMBED` frame still showed the same broken skyline / edge seam.
+- New PPU sampling confirmed why the first screenshot was a weak canary:
+  - that scene is mostly BG2,
+  - BG1 samples were transparent at several “missing ground” points,
+  - and the active mode-2 offset entries on those samples only changed BG2 vertical scroll, not horizontal scroll.
+- The scene also uses active HDMA on PPU registers:
+  - channel 1 -> `$2100` (`INIDISP`)
+  - channel 2 -> `$210F` (`BG2HOFS`)
+  - channel 3 -> `$2126` (window left edge)
+  so future visual debugging needs per-pixel/per-layer observability, not guesses from the final composite alone.
+
+### Changes
+- Implemented a CPU mode-2 renderer path that consults BG3 offset entries for BG1/BG2 sampling.
+- Fixed PPU scroll-register write semantics:
+  - `BGxHOFS` now preserves the low 3 bits from the previous horizontal latch,
+  - `BGxVOFS` still uses the shared background offset latch.
+- Added reusable PPU debug endpoints:
+  - `/ppu/regs`
+  - `/ppu/bg-sample?bg=<1-4>&x=<0-255>&y=<0-223>`
+- Bumped save states to version `8` so the extra `BGHOFS` latch state is preserved; older v7 states still load by defaulting that latch from the old shared scroll latch.
+
+### Validation
+- Release build succeeded after each step.
+- On the current Star Fox state:
+  - `--benchmark-state` remains fast (`~177 FPS` in Release),
+  - `/ppu/regs` reports the expected mode-2 / HDMA-heavy PPU setup,
+  - `/ppu/bg-sample` shows BG2 vertical offset entries being applied on the suspect city scanlines.
+- Scripted input through `/joypad/state?mask=0x1000` followed by `/emu/run?frames=30` reliably reaches the later static `BOMBED` frame at `PC=0x03BD8F`, which is now a better future canary than the original restored briefing image.
+
+### Follow-up
+- The repo's simplified priority notes for modes `2/3/4/5/6` were wrong.
+- Cross-checking against the SNESdev background-mode priority table showed the correct back-to-front order is:
+  - modes `2/3/4/5`: `BG2L -> OBJ0 -> BG1L -> OBJ1 -> BG2H -> OBJ2 -> BG1H -> OBJ3`
+  - mode `6`: `OBJ0 -> BG1L -> OBJ1 -> OBJ2 -> BG1H -> OBJ3`
+- Fixed those z tables in:
+  - CPU PPU composition (`PPU.swift`)
+  - Metal composition (`Shaders.metal`)
+- Added a focused PPU diagnostic that now locks the mode-2 BG ordering:
+  - BG1 low over BG2 low
+  - BG2 high over BG1 low
+  - BG1 high over BG2 high
+- Added a reusable layer-isolated frame dump endpoint:
+  - `/ppu/frame-dump-layer?mask=0x01|0x02|0x10&path=/tmp/file.png`
+- That layer dump narrowed the current Star Fox state much more cleanly:
+  - `BG1` already contains the city/buildings/text/Arwing cutout,
+  - `BG2` is only the sky / mountains / water backdrop,
+  - `OBJ` is empty in this scene,
+  - window masking is disabled (`TMW=0`, `TSW=0`).
+- The visible "floating buildings" on this save state therefore are not caused by missing sprites, color-window clipping, or the final BG1-vs-BG2 composition step.
+- The current state still renders the same visually after the priority fix, so the remaining bug is upstream of final compositing:
+  - either this save state's BG1 VRAM data is already bad from earlier buggy execution,
+  - or the game logic / DMA path that produced this briefing frame is still wrong before the state is saved.
+
+## 2026-03-12: Star Fox Release-State 1 FPS Regression
+
+### Findings
+- The new user report was reproducible on the real save state:
+  - `--benchmark-state "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 120`
+  initially ran at only `3.8 FPS` in Release.
+- The same saved state is in `BGMODE=2`, so the current Metal renderer eligibility check still falls back to the CPU PPU path there.
+- Profiling the Release benchmark with `sample` showed the hottest stack inside `PPU.renderScanline()`:
+  - `renderLayers()`
+  - `renderBG4bpp(...)`
+  - `writePixel(...)`
+  - `String.init(format:)`
+- That cost was self-inflicted:
+  - pixel-trace logging was guarded only **inside** `appendPixelTrace(...)`,
+  - but `writePixel(...)` was eagerly building formatted trace strings for every pixel even when no traced pixels were configured.
+
+### Changes
+- Made `PPU.appendPixelTrace(...)` take an `@autoclosure` and only materialize the formatted message after confirming:
+  - tracing is enabled, and
+  - the current pixel actually matches a configured trace target.
+
+### Validation
+- Rebuilt Release successfully.
+- Re-ran the exact user state benchmarks:
+  - `--benchmark-state ... "Star Fox (USA).state" 120` -> `208.8 FPS`
+  - `--benchmark-state-gpu ... "Star Fox (USA).state" 120` -> `208.3 FPS`
+- The near-identical CPU/GPU numbers on this state are expected because mode 2 is still on the CPU renderer; the 50x speedup came from removing hot-path trace string formatting, not from a renderer switch.
+
+## 2026-03-12: Star Fox Load-State Artifacts and Super FX Performance
+
+### Findings
+- The post-load visual junk was a real buffer-sync bug:
+  - save states restored only the presented `frontBuffer`,
+  - but the next CPU-rendered present swaps `frontBuffer` and `backBuffer`,
+  - so the first frame after load could briefly show stale pixels from the old back buffer.
+- There was also a second UX gap on normal app load:
+  - `EmulatorViewModel.loadState()` restored the state but did not immediately upload the restored framebuffer to the Metal texture.
+- The gameplay slowdown was mostly self-inflicted by the conservative Super FX renderer policy:
+  - `EmulatorCore` was forcing **all** Super FX carts onto the CPU PPU path,
+  - even for scenes already in BG modes that the Metal path implements.
+- Benchmarking the recovered Star Fox briefing state made the cost visible:
+  - CPU PPU path: `120` frames in `14.065s` = `8.5 FPS`
+  - Metal-enabled path on the same state: `120` frames in `5.822s` = `20.6 FPS`
+- Release numbers confirmed this was not just "Star Fox is inherently slow" in the new path:
+  - Release CPU PPU path: `25.6 FPS`
+  - Release Metal-enabled path: `341.1 FPS`
+
+### Changes
+- `PPU.restorePresentedFramebuffer()` now copies the restored image into both front and back framebuffers.
+- `EmulatorViewModel.loadState()` now uploads the restored framebuffer to the active renderer immediately after state restore.
+- Removed the blanket `cartridge.coprocessor == .gsu` CPU-rendering override from `EmulatorCore` so Super FX scenes can use the normal BG-mode-based Metal eligibility checks again.
+- Added reusable headless state benchmarking:
+  - `--benchmark-state <rom> <state> [frames]`
+  - `--benchmark-state-gpu <rom> <state> [frames]`
+
+### Validation
+- Restoring `/tmp/starfox-recovered-v7.state` and querying:
+  - `/ppu/frame-summary?presented=1`
+  - `/ppu/frame-summary?presented=0`
+  returned identical coverage, color count, and sample pixels, confirming the restored back buffer now matches the presented buffer before the next frame runs.
+- `--benchmark-state "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" /tmp/starfox-recovered-v7.state 120` reported `8.5 FPS`.
+- `--benchmark-state-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" /tmp/starfox-recovered-v7.state 120` reported `20.6 FPS` on the same state.
+- The same Release build benchmark commands reported `25.6 FPS` CPU-only and `341.1 FPS` with Metal enabled.
+
+## 2026-03-12: Star Fox Frozen Save-State, Beam-Timing Fix
+
+### Findings
+- The original blue-planet Star Fox save state was not hard-dead in the PPU or Super FX core anymore; it was stuck in a CPU wait loop at `$03:C0A0` polling `$2137/$213C` for the horizontal beam counter.
+- The first bug there was real 65C816 behavior:
+  - `WAI` must resume on an IRQ edge even when the `I` flag masks IRQ vectoring,
+  - but `cpu_step()` only resumed wait state when it was actually taking the IRQ vector.
+- Fixing that exposed the deeper Star Fox-specific timing bug:
+  - the emulator was budgeting each scanline as an isolated integer CPU slice and discarding instruction overrun at the scanline boundary,
+  - so Star Fox kept sampling the same six horizontal counter values forever and never hit its accepted beam window.
+- After carrying instruction overrun forward in master-clock units, the exact saved state immediately escaped `$03:C0A0` on frame 0 and progressed into later game code.
+- A longer headless run from that same state no longer stayed on the tiny blue-planet freeze:
+  - by frame `592` it reached the proper Corneria briefing screen with portraits, planet, and subtitle text visible.
+
+### Changes
+- Fixed `WAI` handling in `cpu_dispatch.c` so masked IRQs still wake the CPU.
+- Changed `EmulatorCore.runScanline()` to schedule CPU execution against the real per-scanline master-clock budget and carry instruction overrun into the next scanline instead of resetting phase every line.
+- Added reusable timing observability:
+  - `/cpu/regs` now exposes `stopped`, `waiting`, `nmiPending`, `irqPending`, and the scanline `masterCarry`.
+- Bumped save states to version `7` and serialized the scanline master-cycle carry so timing-sensitive Super FX states restore to the same execution phase.
+
+### Validation
+- `--diagnose-state "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" "/Users/macos/src/MetalSNES/Star Fox (USA).state" 12` now shows:
+  - frame `0`: `PC $03C0A0->$03C78B`
+  - later frames continue advancing through `$03BDxx` and beyond instead of pinning at the original loop.
+- A debug-server run from the same frozen state followed by `/emu/run?frames=592` reached `PC=0x03C75F` and produced a non-black Corneria briefing frame dump at `/tmp/starfox-after-592.png`.
+- Saving that recovered state produced `/tmp/starfox-recovered-v7.state` with format version `7`, and restoring it reproduced the same `PC=$03BD83` and `masterCarry=12` snapshot.
+
+## 2026-03-12: Super FX Save States and Star Fox STP Repro
+
+### Findings
+- `SaveState.swift` had no Super FX block at all, which is why the app had been explicitly blocking save/load for GSU carts.
+- The missing piece was not ROM/RAM ownership; it was serializing the internal GSU execution state:
+  - registers, flags, cache, pixel cache, trace ring, cycle budget, and IRQ line.
+- A real Star Fox state now restores bit-for-bit at the CPU and GSU register level:
+  - a state captured at frame 120 restored to `PC=$7E4F37`,
+  - the restored GSU snapshot matched exactly,
+  - and the next frame after restore matched the next frame from the original run.
+- The presented CPU framebuffer now rides inside the save-state blob as well, so a freshly restored paused Super FX state shows the same saved image immediately instead of waiting for another frame.
+- While scripting the slow Star Fox menu path through the debug server, a separate correctness bug showed up:
+  - after the title/menu sequence begins advancing, the CPU can fall into repeated `STP`,
+  - and the headless process eventually died after log spam with a malloc double-free report.
+  - That freeze is separate from save-state support and should be debugged as the next Star Fox correctness issue.
+
+### Changes
+- Added native Super FX save/load serialization in `superfx.cpp` / `superfx.h`.
+- Added Swift save/load bridging in `SuperFX.swift`.
+- Bumped the global save-state format to version `6`, added an optional Super FX block in `SaveState.swift`, and serialized the presented PPU framebuffer for immediate visual restores.
+- Re-enabled normal app save/load actions for Super FX carts in `EmulatorViewModel.swift`.
+- Added reusable debug-server endpoints:
+  - `/emu/save-state?path=...`
+  - `/emu/load-state?path=...`
+- Taught the debug server to percent-decode query parameters so file paths with spaces work cleanly.
+
+### Validation
+- `xcodebuild -project /Users/macos/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build CODE_SIGNING_ALLOWED=NO` succeeded after the save-state work.
+- `--serve-rom "/Users/macos/src/MetalSNES/Star Fox (USA).sfc"` + `/emu/run?frames=120` + `/emu/save-state?path=/tmp/starfox-120-v6.state` produced a `555952`-byte Super FX state file with the presented framebuffer included.
+- `--serve-state "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" /tmp/starfox-120-v6.state` restored to the same CPU and GSU register snapshots captured before save, and `/ppu/frame-summary` immediately matched the saved non-black frame without advancing.
+- Advancing one frame after restore reproduced the same CPU state, GSU state, and frame summary as the original run one frame later.
+
+## 2026-03-12: Star Fox Follow-up, Conservative Super FX CPU-PPU Fallback
+
+### Findings
+- The earlier mode-2 fallback fixed the outright black-screen case, but Star Fox still had scene-specific rendering risk on the Metal path.
+- Repeated Star Fox debugging from live ROM boot kept converging on the same practical conclusion:
+  - the CPU PPU path was the trustworthy renderer for this cart,
+  - while the Metal compositor was still only partially validated against Super FX scenes.
+- The remaining user report was no longer "nothing renders" but "some scenes still look wrong / incomplete," which is the wrong time to keep splitting output across two different renderers.
+
+### Changes
+- Added a conservative `PPU.forceCPURendering` switch.
+- `EmulatorCore` now forces CPU PPU rendering for Super FX cartridges during core setup instead of only relying on BG-mode-based Metal gating.
+
+### Validation
+- This change is deliberately narrow:
+  - it only affects Super FX carts,
+  - and it leaves the existing non-Super-FX Metal fast path unchanged.
+- A fresh build after the fallback change is required before re-checking the live Star Fox GUI path.
+
+## 2026-03-12: Star Fox "Black Screen" Was the GPU PPU Path
+
+### Findings
+- The ROM execution path was not the remaining blocker anymore:
+  - headless CPU rendering at frame 240 produced a valid Star Fox image,
+  - including a sparse but recognizable Arwing/starfield frame,
+  - so the game was not actually "rendering nothing."
+- The earlier `INIDISP=0x80` snapshots were misleading on their own because headless diagnostics sample the presented frame from scanline 223, while the PPU register snapshot is taken later during VBlank.
+- Reusable observability made the remaining issue tractable:
+  - `/cpu/write-log/clear` made it possible to inspect one frame of register traffic at a time,
+  - `/bus/regs` now exposes `HTIME`, `VTIME`, `TIMEUP`, `MDMAEN`, and `HDMAEN`,
+  - `/ppu/frame-summary` quantified the presented frame instead of guessing from a few pixels,
+  - and `/ppu/frame-dump` confirmed the CPU-rendered output visually.
+- The actual GUI black-screen bug was in the Metal PPU fast path:
+  - `Renderer/Shaders.metal` only has explicit composition logic for modes 0, 1, 3, and 7,
+  - but `PPU.shouldUseGPURendering()` still allowed all modes 0 through 7,
+  - and Star Fox is running in BG mode 2.
+- That meant the app window could take a GPU path that does not correctly implement the mode Star Fox needs, while the CPU PPU path was already producing the right image.
+
+### Changes
+- Added debug-server observability for this investigation:
+  - `/cpu/write-log/clear`
+  - expanded `/bus/regs`
+  - `/ppu/frame-summary`
+  - `/ppu/frame-dump`
+- Restricted GPU PPU rendering in `PPU.swift` to the modes the current Metal shader actually implements.
+  - Modes 2, 4, 5, and 6 now fall back to the CPU renderer instead of trying to use the incomplete Metal path.
+
+### Validation
+- `--diagnose-rom "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" 240` still showed a sparse presented image with non-black pixels and a wide non-black bounding box instead of a truly empty frame.
+- `/ppu/frame-summary?presented=1` at frame 240 reported:
+  - `964` non-black pixels,
+  - `18` unique colors,
+  - bounding box `x=17..236`, `y=24..204`.
+- `/ppu/frame-dump?presented=1` wrote `/tmp/metalsnes-frame.png`, which showed a recognizable Star Fox frame on the CPU path.
+- `xcodebuild -project /Users/macos/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build CODE_SIGNING_ALLOWED=NO` succeeded after the fallback change.
+- `--benchmark-gpu "/Users/macos/src/MetalSNES/Star Fox (USA).sfc"` still completed after the mode-gating change.
+
+## 2026-03-12: Super FX ROM Diagnostics and Debug-Server Introspection
+
+### Findings
+- The first-pass Super FX execution path was enough to get Star Fox through benchmarked frames, but it was still hard to debug cleanly from a fresh boot.
+- The initial attempt at Super FX register introspection was wrong in two separate ways:
+  - several getters were accidentally calling nonexistent methods,
+  - and others reused `readIO()`, which can mutate state such as the IRQ latch on `$3031`.
+- The existing headless tooling only supported save-state diagnostics or a fully automated benchmark, which made “boot the ROM, inspect state, advance a few frames, inspect again” harder than it needed to be.
+- The HTTP debug server also had a latent queue-lifetime bug:
+  - `NWListener` and per-connection handlers were started on inline `DispatchQueue(...)` instances,
+  - so the server could claim to be listening without reliably keeping those queues alive.
+
+### Changes
+- Reworked the Super FX bridge so `superfx.cpp` now exposes side-effect-free debug snapshots of the coprocessor register state.
+- Added a Swift-facing `SuperFXSnapshot` in `Emulator/SuperFX.swift`.
+- Extended the HTTP debug server with:
+  - `/emu/run?frames=N` to advance a paused headless core deterministically,
+  - `/superfx/regs` for raw GSU register/flag state,
+  - and `/superfx/ram` for cart RAM inspection on Super FX boards.
+- Added new headless CLI paths:
+  - `--diagnose-rom <rom> [frames]`
+  - `--serve-rom <rom>`
+- Fixed `DebugServer.swift` queue lifetime by retaining the listener/connection queues and only logging “Listening” from the listener `.ready` state.
+- Updated the README so the documented CLI/debug flow matches the new ROM-first diagnostic path.
+
+### Validation
+- `xcodebuild -project /Users/macos/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build CODE_SIGNING_ALLOWED=NO` succeeded after the Super FX/debug-server changes.
+- `--serve-rom "/Users/macos/src/MetalSNES/Star Fox (USA).sfc"` now starts a usable live debug session.
+  - Root endpoint returns the expanded endpoint list including `/emu/run`, `/superfx/regs`, and `/superfx/ram`.
+  - `/emu/run?frames=120` advanced the paused core to frame 122 and reported CPU state like `pc=0x02DCC5`, `tm=0x17`, `ts=0x07`.
+  - `/superfx/regs` reported live GSU state after that run, including `R15=0xA89D`, `PBR=0x01`, `SFR=0x0006`.
+  - `/superfx/ram?addr=0x0000&len=16` returned the expected 32 KB cart RAM window and readable bytes.
+- `--diagnose-rom "/Users/macos/src/MetalSNES/Star Fox (USA).sfc" 120` completed from power-on and dumped repeatable runtime/PPU state instead of failing on cartridge parsing or UI startup.
+
+## 2026-03-12: First-pass Super FX / Star Fox Execution
+
+### Findings
+- The earlier Super FX rejection path was honest, but it also hid the real work still missing:
+  - Star Fox needs a real GSU execution core,
+  - Star Fox uses 32 KB of cartridge RAM even though its header reports zero SRAM,
+  - and the existing bus only knew plain LoROM/HiROM CPU mappings.
+- The current emulator architecture is still usable for a first pass:
+  - there was already a C bridge in-tree for the CPU core,
+  - the bus already owned the cartridge RAM buffer,
+  - and the emulation loop had one clear place to step another coprocessor alongside the CPU/APU.
+- Save states and run-ahead were a correctness trap for any new coprocessor path because `SaveState.swift` has no Super FX serialization at all.
+
+### Changes
+- Added a native Super FX bridge in `CCore/superfx.cpp` and `CCore/superfx.h`, plus a small Swift wrapper in `Emulator/SuperFX.swift`.
+  - The core is adapted from the bsnes GSU implementation and trimmed to the pieces needed for first-pass execution in this codebase.
+- `Cartridge.swift` no longer rejects Super FX carts outright.
+  - It now detects a first-pass GSU board variant,
+  - allocates 32 KB of cart RAM for Star Fox-style GSU carts even when the ROM header reports zero SRAM,
+  - and exposes CPU-visible Super FX ROM/RAM mapping helpers for the bus.
+- `Bus.swift` now routes Super FX register, ROM, and RAM accesses through the new coprocessor path.
+- `EmulatorCore.swift` now steps the GSU alongside CPU execution and forwards the GSU IRQ line into the CPU IRQ path.
+- `EmulatorViewModel.swift` now disables run-ahead for Super FX carts and blocks save-state actions until coprocessor state serialization exists.
+
+### Validation
+- `xcodebuild -project /Users/macos/src/MetalSNES/MetalSNES.xcodeproj -scheme MetalSNES -configuration Debug -derivedDataPath /tmp/MetalSNESDerived build CODE_SIGNING_ALLOWED=NO` succeeded.
+- `/tmp/MetalSNESDerived/Build/Products/Debug/MetalSNES.app/Contents/MacOS/MetalSNES --benchmark "/Users/macos/src/MetalSNES/Star Fox (USA).sfc"` completed successfully on the real ROM.
+  - `CPU Reset: PC=$FF96, P=$34, S=$01FF, E=1`
+  - `Benchmark: 120 frames in 4.521 sec = 26.5 FPS (0.4x realtime)`
+
+## 2026-03-12: Star Fox / Super FX Detection
+
+### Findings
+- `Cartridge.swift` only implements plain LoROM/HiROM ROM mapping.
+- There is no Super FX / GSU path anywhere in the emulator, so Star Fox was never going to be a small renderer bug or mapper bug.
+- Worse, the app still treated those ROMs like ordinary carts:
+  - GUI load would just surface a generic ROM failure,
+  - the benchmark path used `try! Cartridge(data:)`,
+  - and headless state-serving collapsed multiple parse failures into "Cannot parse ROM".
+
+### Changes
+- Added coprocessor detection from the SNES internal ROM header chipset byte (`$FFD6` / equivalent).
+- `Cartridge` now rejects unsupported enhancement-chip carts with a specific error message, including Super FX / GSU carts such as Star Fox.
+- Tightened CLI error reporting so benchmark and serve-state modes surface the real cartridge error instead of crashing or printing a generic parse failure.
+- Updated the README status line so the repo no longer implies enhancement-chip cartridges are expected to work.
+
+## 2026-03-12: Sub-screen Window Fix + Headless PPU Diagnostics
+
+### Findings
+- The CPU renderer still had a real sub-screen window bug despite the earlier notes about `TSW` support:
+  - `writePixel()` checked `TSW` while rendering the sub-screen,
+  - but `isWindowMasked()` independently re-checked only `TMW`,
+  - so sub-screen layer windows were silently skipped whenever `TSW` was enabled without the matching `TMW` bit.
+- The built-in `PPUDiagnostic` helper also had a correctness bug of its own:
+  - it wrote CGRAM bytes directly,
+  - which bypassed the cached RGB conversion table used by the renderer,
+  - so the diagnostic path could report misleading results even when the renderer was behaving correctly.
+- The headless CLI paths still fell back to hardcoded local ROM/state filenames (`mario.sfc`, `zelda.sfc`, `zelda.state`) that are not present in this checkout, which made missing-argument invocations fail in a confusing way.
+
+### Changes
+- Fixed the CPU PPU window path in `PPU.swift` by removing the redundant `TMW`-only gate from `isWindowMasked()`.
+  - The caller already decides whether the active screen uses `TMW` or `TSW`, so the helper now only evaluates the actual window geometry and logic.
+- Expanded `PPUDiagnostic.swift`:
+  - each diagnostic test now gets a fresh `PPU`,
+  - CGRAM writes now go through the real `$2121/$2122` register path so the color cache stays coherent,
+  - reset now also clears window state and restores internal PPU snapshot state,
+  - and a new regression test covers sub-screen masking with `TSW` enabled and `TMW` disabled.
+- Added a new headless CLI mode:
+  - `--ppu-diagnostic` runs the built-in PPU diagnostic suite without opening the UI.
+- Tightened CLI argument handling in `MetalSNESApp.swift`:
+  - `--benchmark`, `--benchmark-gpu`, `--diagnose-state`, and `--serve-state` now fail fast with explicit usage text when required paths are omitted instead of guessing nonexistent local files.
+- Updated `README.md` and `ISSUES.md` so the repo docs match the current renderer and CLI behavior.
+
 ## 2026-03-10: Hybrid Metal PPU Path for Common Frames
 
 ### Findings

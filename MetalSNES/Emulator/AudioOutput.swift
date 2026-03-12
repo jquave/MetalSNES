@@ -7,8 +7,8 @@ final class AudioOutput {
     private var sourceNode: AVAudioSourceNode?
 
     // Ring buffer (single-producer / single-consumer, lock-protected positions)
-    private let bufferSize = 16384  // samples per channel
-    private let prebufferSamples = 1024
+    private let bufferSize = 32768  // samples per channel
+    private let prebufferSamples = 1536
     private var bufferL: [Int16]
     private var bufferR: [Int16]
     private var writePos = 0  // only written by emulator thread
@@ -123,14 +123,41 @@ final class AudioOutput {
         let rp = readPos
         let nextWrite = (wp + 1) % bufferSize
         if nextWrite == rp {
-            // Keep the newest audio and discard the oldest queued sample.
-            readPos = (rp + 1) % bufferSize
+            // Preserve continuity by dropping incoming samples when the producer gets ahead.
             overrunCount &+= 1
+            os_unfair_lock_unlock(&lock)
+            return
         }
 
         bufferL[wp] = left
         bufferR[wp] = right
         writePos = nextWrite
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Called from emulator thread to enqueue a stereo sample batch with one lock acquisition.
+    func writeSamples(left: [Int16], right: [Int16]) {
+        guard !left.isEmpty, left.count == right.count else { return }
+
+        os_unfair_lock_lock(&lock)
+        var wp = writePos
+        let rp = readPos
+
+        for i in left.indices {
+            let nextWrite = (wp + 1) % bufferSize
+            if nextWrite == rp {
+                // Preserve continuity by dropping the rest of this batch when full.
+                overrunCount &+= UInt64(left.count - i)
+                break
+            }
+
+            bufferL[wp] = left[i]
+            bufferR[wp] = right[i]
+            wp = nextWrite
+        }
+
+        writePos = wp
+        readPos = rp
         os_unfair_lock_unlock(&lock)
     }
 

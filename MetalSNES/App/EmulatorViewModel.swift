@@ -80,7 +80,10 @@ final class EmulatorViewModel: ObservableObject {
             core.renderer = renderer
             core.debugState = debugState
             core.debugSnapshotsEnabled = debugUIEnabled
-            core.runAheadFrames = runAheadFrames
+            core.runAheadFrames = cartridge.coprocessor == .gsu ? 0 : runAheadFrames
+            if debugUIEnabled {
+                core.startDebugServer()
+            }
             inputManager.attach(joypad: core.bus.joypad)
 
             // Load SRAM if a .srm file exists next to the ROM
@@ -139,7 +142,10 @@ final class EmulatorViewModel: ObservableObject {
         debugUIEnabled = enabled
         emulatorCore?.debugSnapshotsEnabled = enabled
         if enabled {
+            emulatorCore?.startDebugServer()
             updateDebugState()
+        } else {
+            emulatorCore?.stopDebugServer()
         }
     }
 
@@ -230,6 +236,9 @@ final class EmulatorViewModel: ObservableObject {
             let data = try Data(contentsOf: stateURL)
             let ss = SaveState()
             try ss.restore(from: data, core: core)
+            if let framebuffer = core.bus.ppu.frontBuffer.baseAddress {
+                core.renderer?.uploadFramebuffer(framebuffer)
+            }
             statusText = "State loaded"
             print("Save state loaded from \(stateURL.path)")
             updateDebugState()
@@ -294,7 +303,6 @@ final class EmulatorViewModel: ObservableObject {
     }
 
     private func startEmulationThread(for core: EmulatorCore) {
-        core.startDebugServer()
         core.isRunning = true
         isRunning = true
         statusText = "Running"

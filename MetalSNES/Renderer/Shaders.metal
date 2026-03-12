@@ -1011,17 +1011,24 @@ inline void composeScreen(thread PixelSample &best,
     }
     case 3u:
         if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 1u, 5u), colors); }
-        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG8bpp(vram, line, 0u, screenX, screenY, 2u, 6u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u), colors); }
+        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG8bpp(vram, line, 0u, screenX, screenY, 3u, 7u), colors); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 2u, 4u, 6u, 8u), colors); }
+        break;
+    case 4u:
+    case 5u:
+        if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 1u, 5u), colors); }
+        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 3u, 7u), colors); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 2u, 4u, 6u, 8u), colors); }
+        break;
+    case 6u:
+        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 2u, 5u), colors); }
+        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 1u, 3u, 4u, 6u), colors); }
         break;
     case 7u:
         if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleMode7(vram, line, screenX, screenY, 1u), colors); }
         if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 1u, 2u, 3u, 4u), colors); }
         break;
     default:
-        if ((layerMask & 0x02u) != 0u && !isWindowMaskedForLayer(2u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 1u, screenX, screenY, 1u, 5u), colors); }
-        if ((layerMask & 0x01u) != 0u && !isWindowMaskedForLayer(1u, line, screenX, subScreen)) { applyIndexedSample(best, sampleBG4bpp(vram, line, 0u, screenX, screenY, 2u, 6u), colors); }
-        if ((layerMask & 0x10u) != 0u && !isWindowMaskedForLayer(5u, line, screenX, subScreen)) { applyIndexedSample(best, sampleSprites(vram, oam, spriteCounts, spriteIndices, line, screenX, screenY, 3u, 4u, 7u, 8u), colors); }
         break;
     }
 }

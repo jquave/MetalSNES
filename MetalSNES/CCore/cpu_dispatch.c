@@ -2228,6 +2228,11 @@ int cpu_step(CPURegisters *regs, BusReadFunc bus_read, BusWriteFunc bus_write, v
         return 8;
     }
 
+    // WAI resumes on any IRQ edge even when the I flag masks vectoring.
+    if (regs->irqPending) {
+        regs->waiting = false;
+    }
+
     if (regs->waiting) {
         return 1;
     }

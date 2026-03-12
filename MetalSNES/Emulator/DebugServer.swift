@@ -1,10 +1,13 @@
 import Foundation
 import Network
+import AppKit
 
-/// Lightweight HTTP debug server for real-time SPC/DSP inspection.
+/// Lightweight HTTP debug server for real-time emulator inspection.
 /// Listens on port 8765, responds to GET requests with JSON.
 final class DebugServer {
     private var listener: NWListener?
+    private let listenerQueue = DispatchQueue(label: "debugserver.listener")
+    private let connectionQueue = DispatchQueue(label: "debugserver.connection", attributes: .concurrent)
     weak var emulator: EmulatorCore?
 
     func start() {
@@ -16,11 +19,24 @@ final class DebugServer {
             return
         }
 
+        listener?.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                print("[DebugServer] Listening on port 8765")
+                fflush(stdout)
+            case .failed(let error):
+                print("[DebugServer] Listener failed: \(error)")
+                fflush(stdout)
+                self?.listener?.cancel()
+                self?.listener = nil
+            default:
+                break
+            }
+        }
         listener?.newConnectionHandler = { [weak self] conn in
             self?.handleConnection(conn)
         }
-        listener?.start(queue: DispatchQueue(label: "debugserver"))
-        print("[DebugServer] Listening on port 8765")
+        listener?.start(queue: listenerQueue)
     }
 
     func stop() {
@@ -29,7 +45,7 @@ final class DebugServer {
     }
 
     private func handleConnection(_ conn: NWConnection) {
-        conn.start(queue: DispatchQueue(label: "debugconn"))
+        conn.start(queue: connectionQueue)
         conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
             guard let self = self, let data = data, error == nil else {
                 conn.cancel()
@@ -63,6 +79,63 @@ final class DebugServer {
         let dsp = emu.bus.apu.dsp
 
         switch path {
+        case "/emu/run":
+            guard !emu.isRunning else {
+                return "{\"error\":\"emulator is already running\"}"
+            }
+            let frames = max(1, min(600, Int(params["frames"] ?? "1") ?? 1))
+            emu.runDebugFrames(frames)
+            let pc = (UInt32(emu.cpu.regs.PBR) << 16) | UInt32(emu.cpu.regs.PC)
+            return String(format:
+                "{\"ok\":true,\"frames\":%d,\"frameCount\":%llu,\"pc\":\"0x%06X\",\"inidisp\":\"0x%02X\",\"tm\":\"0x%02X\",\"ts\":\"0x%02X\",\"hvbjoy\":\"0x%02X\"}",
+                frames,
+                emu.completedFrames,
+                pc,
+                emu.bus.ppu.inidisp,
+                emu.bus.ppu.tm,
+                emu.bus.ppu.ts,
+                emu.bus.hvbjoy
+            )
+
+        case "/emu/save-state":
+            guard !emu.isRunning else {
+                return "{\"error\":\"emulator is already running\"}"
+            }
+            guard let statePath = params["path"], !statePath.isEmpty else {
+                return "{\"error\":\"missing path\"}"
+            }
+            let codec = SaveState()
+            let data = codec.save(core: emu)
+            do {
+                try data.write(to: URL(fileURLWithPath: statePath))
+                return "{\"ok\":true,\"path\":\"\(jsonEscaped(statePath))\",\"bytes\":\(data.count)}"
+            } catch {
+                return "{\"error\":\"\(jsonEscaped(error.localizedDescription))\"}"
+            }
+
+        case "/emu/load-state":
+            guard !emu.isRunning else {
+                return "{\"error\":\"emulator is already running\"}"
+            }
+            guard let statePath = params["path"], !statePath.isEmpty else {
+                return "{\"error\":\"missing path\"}"
+            }
+            let codec = SaveState()
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: statePath))
+                try codec.restore(from: data, core: emu)
+                let pc = (UInt32(emu.cpu.regs.PBR) << 16) | UInt32(emu.cpu.regs.PC)
+                return String(
+                    format: "{\"ok\":true,\"path\":\"%@\",\"bytes\":%d,\"pc\":\"0x%06X\",\"inidisp\":\"0x%02X\"}",
+                    jsonEscaped(statePath),
+                    data.count,
+                    pc,
+                    emu.bus.ppu.inidisp
+                )
+            } catch {
+                return "{\"error\":\"\(jsonEscaped(error.localizedDescription))\"}"
+            }
+
         case "/spc/ram":
             let addr = parseHexInt(params["addr"] ?? "0")
             let len = Int(params["len"] ?? "16") ?? 16
@@ -176,6 +249,43 @@ final class DebugServer {
             }
             return "{\"addr\":\"\(String(format: "0x%04X", addr))\",\"data\":[\(bytes.joined(separator: ","))]}"
 
+        case "/ppu/regs":
+            let ppu = emu.bus.ppu
+            let hScroll = ppu.bgHScroll.enumerated().map { index, value in
+                String(format: "\"bg%d\":\"0x%04X\"", index + 1, value)
+            }.joined(separator: ",")
+            let vScroll = ppu.bgVScroll.enumerated().map { index, value in
+                String(format: "\"bg%d\":\"0x%04X\"", index + 1, value)
+            }.joined(separator: ",")
+            return """
+            {"inidisp":"\(String(format: "0x%02X", ppu.inidisp))","bgmode":"\(String(format: "0x%02X", ppu.bgmode))","tm":"\(String(format: "0x%02X", ppu.tm))","ts":"\(String(format: "0x%02X", ppu.ts))","cgwsel":"\(String(format: "0x%02X", ppu.cgwsel))","cgadsub":"\(String(format: "0x%02X", ppu.cgadsub))","setini":"\(String(format: "0x%02X", ppu.setini))","bg1sc":"\(String(format: "0x%02X", ppu.bg1sc))","bg2sc":"\(String(format: "0x%02X", ppu.bg2sc))","bg3sc":"\(String(format: "0x%02X", ppu.bg3sc))","bg4sc":"\(String(format: "0x%02X", ppu.bg4sc))","bg12nba":"\(String(format: "0x%02X", ppu.bg12nba))","bg34nba":"\(String(format: "0x%02X", ppu.bg34nba))","bgHScroll":{\(hScroll)},"bgVScroll":{\(vScroll)}}
+            """
+
+        case "/ppu/bg-sample":
+            let bg = max(1, min(4, Int(params["bg"] ?? "1") ?? 1)) - 1
+            let x = max(0, min(255, Int(params["x"] ?? "0") ?? 0))
+            let y = max(0, min(223, Int(params["y"] ?? "0") ?? 0))
+            guard let sample = emu.bus.ppu.debugSampleBG4bpp(bg: bg, screenX: x, screenY: y) else {
+                return "{\"error\":\"unsupported bg\"}"
+            }
+            return """
+            {"bg":\(sample.bg + 1),"x":\(sample.screenX),"y":\(sample.screenY),"sampleX":\(sample.sampleX),"sampleY":\(sample.sampleY),"hScroll":"\(String(format: "0x%04X", sample.hScroll))","vScroll":"\(String(format: "0x%04X", sample.vScroll))","hOffsetEntry":"\(String(format: "0x%04X", sample.horizontalOffsetEntry))","vOffsetEntry":"\(String(format: "0x%04X", sample.verticalOffsetEntry))","hOffsetApplied":\(sample.horizontalOffsetApplied),"vOffsetApplied":\(sample.verticalOffsetApplied),"tileEntry":"\(String(format: "0x%04X", sample.tileEntry))","tile":"\(String(format: "0x%03X", sample.tileNumber))","palette":\(sample.palette),"priority":\(sample.highPriority ? 1 : 0),"hFlip":\(sample.hFlip),"vFlip":\(sample.vFlip),"pixel":\(sample.pixel),"colorIndex":"\(String(format: "0x%02X", sample.colorIndex))","chrAddr":"\(String(format: "0x%04X", sample.chrAddr))"}
+            """
+
+        case "/ppu/frame-summary":
+            return frameSummary(ppu: emu.bus.ppu, presented: params["presented"] != "0")
+
+        case "/ppu/frame-dump":
+            let path = params["path"] ?? "/tmp/metalsnes-frame.png"
+            return dumpFrame(ppu: emu.bus.ppu, presented: params["presented"] != "0", path: path)
+
+        case "/ppu/frame-dump-layer":
+            let path = params["path"] ?? "/tmp/metalsnes-layer-frame.png"
+            let mask = UInt8(parseHexInt(params["mask"] ?? "0") & 0x1F)
+            let subScreen = params["sub"] == "1"
+            let pixels = emu.bus.ppu.debugRenderLayerFrame(layerMask: mask, subScreen: subScreen)
+            return dumpFrame(pixels: pixels, path: path)
+
         case "/ppu/oam":
             let start = max(0, min(127, Int(params["index"] ?? "0") ?? 0))
             let count = max(1, min(128 - start, Int(params["count"] ?? "1") ?? 1))
@@ -192,6 +302,49 @@ final class DebugServer {
             let y = max(0, min(223, Int(params["y"] ?? "0") ?? 0))
             let samples = spriteSamples(atX: x, y: y, ppu: emu.bus.ppu)
             return "{\"x\":\(x),\"y\":\(y),\"count\":\(samples.count),\"samples\":[\(samples.joined(separator: ","))]}"
+
+        case "/superfx/regs":
+            guard let superFX = emu.bus.superFX else {
+                return "{\"error\":\"no superfx\"}"
+            }
+            let snapshot = superFX.debugSnapshot()
+            let regs = snapshot.regs.map { String(format: "\"0x%04X\"", $0) }.joined(separator: ",")
+            let flags = """
+            {"z":\(snapshot.sfr & 0x0002 != 0),"cy":\(snapshot.sfr & 0x0004 != 0),"s":\(snapshot.sfr & 0x0008 != 0),"ov":\(snapshot.sfr & 0x0010 != 0),"g":\(snapshot.sfr & 0x0020 != 0),"r":\(snapshot.sfr & 0x0040 != 0),"alt1":\(snapshot.sfr & 0x0100 != 0),"alt2":\(snapshot.sfr & 0x0200 != 0),"il":\(snapshot.sfr & 0x0400 != 0),"ih":\(snapshot.sfr & 0x0800 != 0),"b":\(snapshot.sfr & 0x1000 != 0),"irq":\(snapshot.sfr & 0x8000 != 0)}
+            """
+            return """
+            {"r":[\(regs)],"sfr":"\(String(format: "0x%04X", snapshot.sfr))","flags":\(flags),"pbr":"\(String(format: "0x%02X", snapshot.pbr))","rombr":"\(String(format: "0x%02X", snapshot.rombr))","rambr":"\(String(format: "0x%02X", snapshot.rambr))","cbr":"\(String(format: "0x%04X", snapshot.cbr))","scbr":"\(String(format: "0x%02X", snapshot.scbr))","scmr":"\(String(format: "0x%02X", snapshot.scmr))","colr":"\(String(format: "0x%02X", snapshot.colr))","por":"\(String(format: "0x%02X", snapshot.por))","vcr":"\(String(format: "0x%02X", snapshot.vcr))","cfgr":"\(String(format: "0x%02X", snapshot.cfgr))","clsr":"\(String(format: "0x%02X", snapshot.clsr))","pipeline":"\(String(format: "0x%02X", snapshot.pipeline))","ramaddr":"\(String(format: "0x%04X", snapshot.ramaddr))","romcl":"\(String(format: "0x%08X", snapshot.romcl))","romdr":"\(String(format: "0x%02X", snapshot.romdr))","ramcl":"\(String(format: "0x%08X", snapshot.ramcl))","ramar":"\(String(format: "0x%04X", snapshot.ramar))","ramdr":"\(String(format: "0x%02X", snapshot.ramdr))","irqLine":\(snapshot.irqActive)}
+            """
+
+        case "/superfx/recent-trace":
+            guard let superFX = emu.bus.superFX else {
+                return "{\"error\":\"no superfx\"}"
+            }
+            let count = min(Int(params["count"] ?? "64") ?? 64, 512)
+            let entries = superFX.recentTrace(limit: count).map { entry in
+                String(
+                    format: "{\"pbr\":\"0x%02X\",\"rombr\":\"0x%02X\",\"opcode\":\"0x%02X\",\"r12\":\"0x%04X\",\"r13\":\"0x%04X\",\"r14\":\"0x%04X\",\"r15\":\"0x%04X\",\"sfr\":\"0x%04X\"}",
+                    entry.pbr,
+                    entry.rombr,
+                    entry.opcode,
+                    entry.r12,
+                    entry.r13,
+                    entry.r14,
+                    entry.r15,
+                    entry.sfr
+                )
+            }
+            return "{\"count\":\(entries.count),\"trace\":[\(entries.joined(separator: ","))]}"
+
+        case "/superfx/ram":
+            guard emu.bus.superFX != nil else {
+                return "{\"error\":\"no superfx\"}"
+            }
+            let start = min(max(parseHexInt(params["addr"] ?? "0"), 0), emu.bus.sram.count - 1)
+            let requestedLen = Int(params["len"] ?? "16") ?? 16
+            let len = max(1, min(requestedLen, min(512, emu.bus.sram.count - start)))
+            let bytes = (0..<len).map { String(format: "\"%02X\"", emu.bus.sram[start + $0]) }
+            return "{\"addr\":\"\(String(format: "0x%04X", start))\",\"len\":\(len),\"size\":\(emu.bus.sram.count),\"data\":[\(bytes.joined(separator: ","))]}"
 
         case "/dma/state":
             let dma = emu.bus.dma
@@ -236,14 +389,23 @@ final class DebugServer {
 
         case "/cpu/regs":
             let r = emu.cpu.regs
-            return "{\"A\":\"\(String(format: "0x%04X", r.A))\",\"X\":\"\(String(format: "0x%04X", r.X))\",\"Y\":\"\(String(format: "0x%04X", r.Y))\",\"S\":\"\(String(format: "0x%04X", r.S))\",\"D\":\"\(String(format: "0x%04X", r.D))\",\"PC\":\"\(String(format: "0x%04X", r.PC))\",\"PBR\":\"\(String(format: "0x%02X", r.PBR))\",\"DBR\":\"\(String(format: "0x%02X", r.DBR))\",\"P\":\"\(String(format: "0x%02X", r.P))\",\"E\":\(r.emulationMode)}"
+            return "{\"A\":\"\(String(format: "0x%04X", r.A))\",\"X\":\"\(String(format: "0x%04X", r.X))\",\"Y\":\"\(String(format: "0x%04X", r.Y))\",\"S\":\"\(String(format: "0x%04X", r.S))\",\"D\":\"\(String(format: "0x%04X", r.D))\",\"PC\":\"\(String(format: "0x%04X", r.PC))\",\"PBR\":\"\(String(format: "0x%02X", r.PBR))\",\"DBR\":\"\(String(format: "0x%02X", r.DBR))\",\"P\":\"\(String(format: "0x%02X", r.P))\",\"E\":\(r.emulationMode),\"stopped\":\(r.stopped),\"waiting\":\(r.waiting),\"nmiPending\":\(r.nmiPending),\"irqPending\":\(r.irqPending),\"masterCarry\":\(emu.cpuMasterCycleCarry)}"
 
         case "/cpu/write-log":
-            let entries = emu.bus.cpuWriteLog.suffix(200).map { entry in
+            let count = min(Int(params["count"] ?? "200") ?? 200, 2000)
+            let targetFilter = params["target"].map(parseHexInt)
+            let entries = emu.bus.cpuWriteLog.filter { entry in
+                guard let targetFilter else { return true }
+                return Int(entry.target & 0xFFFF) == targetFilter
+            }.suffix(count).map { entry in
                 String(format: "{\"pc\":\"0x%06X\",\"opcode\":\"0x%02X\",\"target\":\"0x%06X\",\"value\":\"0x%02X\"}",
                        entry.pc, entry.opcode, entry.target, entry.value)
             }
-            return "{\"count\":\(emu.bus.cpuWriteLog.count),\"log\":[\(entries.joined(separator: ","))]}"
+            return "{\"count\":\(entries.count),\"total\":\(emu.bus.cpuWriteLog.count),\"log\":[\(entries.joined(separator: ","))]}"
+
+        case "/cpu/write-log/clear":
+            emu.bus.cpuWriteLog.removeAll(keepingCapacity: true)
+            return "{\"ok\":true}"
 
         case "/cpu/trace":
             let ms = min(Int(params["ms"] ?? "50") ?? 50, 500)
@@ -273,8 +435,20 @@ final class DebugServer {
 
         case "/bus/regs":
             return """
-            {"nmitimen":"\(String(format: "0x%02X", emu.bus.nmitimen))","rdnmi":"\(String(format: "0x%02X", emu.bus.rdnmi))","hvbjoy":"\(String(format: "0x%02X", emu.bus.hvbjoy))","nmiPending":\(emu.bus.nmiPending),"inVBlank":\(emu.bus.inVBlank)}
+            {"nmitimen":"\(String(format: "0x%02X", emu.bus.nmitimen))","htime":"0x\(String(format: "%03X", emu.bus.htime))","vtime":"0x\(String(format: "%03X", emu.bus.vtime))","mdmaen":"\(String(format: "0x%02X", emu.bus.mdmaen))","hdmaen":"\(String(format: "0x%02X", emu.bus.hdmaen))","rdnmi":"\(String(format: "0x%02X", emu.bus.rdnmi))","timeup":"\(String(format: "0x%02X", emu.bus.timeup))","hvbjoy":"\(String(format: "0x%02X", emu.bus.hvbjoy))","nmiPending":\(emu.bus.nmiPending),"inVBlank":\(emu.bus.inVBlank)}
             """
+
+        case "/joypad/state":
+            if let maskParam = params["mask"] {
+                let mask = UInt16(parseHexInt(maskParam) & 0xFFFF)
+                emu.bus.joypad.setSourceState(mask, for: .keyboard)
+            }
+            return String(
+                format: "{\"joy1State\":\"0x%04X\",\"joy1Auto\":\"0x%04X\",\"joy2Auto\":\"0x%04X\"}",
+                emu.bus.joypad.joy1State,
+                emu.bus.joypad.joy1Auto,
+                emu.bus.joypad.joy2Auto
+            )
 
         case "/spc/trace":
             let count = Int(params["count"] ?? "500") ?? 500
@@ -345,7 +519,7 @@ final class DebugServer {
 
         default:
             return """
-            {"endpoints":["/spc/ram?addr=0x0000&len=16","/spc/ram/write?addr=0x01&val=0x01","/spc/ports","/spc/ports/write?port=2&val=0x01","/spc/regs","/spc/timers","/dsp/regs","/dsp/regs/write?reg=0x4C&val=0x01","/dsp/kon?voice=0&srcn=0&pitch=0x1000","/dsp/voices","/ppu/vram?addr=0x0000&len=16","/ppu/oam?index=116&count=6","/ppu/sprites?scanline=65","/ppu/sprite-sample?x=127&y=65","/dma/state","/cpu/wram?addr=0x1DFB&len=16","/cpu/wram/write?addr=0x1DFB&val=0x01","/cpu/regs","/cpu/write-log","/cpu/trace?ms=50","/audio/stats","/spc/trace?count=500","/spc/inject?p0=0x01&p2=0x01","/wram/range?addr=0x1DF9&len=8"]}
+            {"endpoints":["/emu/run?frames=1","/emu/save-state?path=/tmp/game.state","/emu/load-state?path=/tmp/game.state","/cpu/regs","/cpu/wram?addr=0x1DFB&len=16","/cpu/wram/write?addr=0x1DFB&val=0x01","/cpu/write-log","/cpu/trace?ms=50","/spc/ram?addr=0x0000&len=16","/spc/ram/write?addr=0x01&val=0x01","/spc/ports","/spc/ports/write?port=2&val=0x01","/spc/regs","/spc/timers","/spc/trace?count=500","/spc/inject?p0=0x01&p2=0x01","/dsp/regs","/dsp/regs/write?reg=0x4C&val=0x01","/dsp/kon?voice=0&srcn=0&pitch=0x1000","/dsp/voices","/ppu/vram?addr=0x0000&len=16","/ppu/oam?index=116&count=6","/ppu/sprites?scanline=65","/ppu/sprite-sample?x=127&y=65","/ppu/frame-dump-layer?mask=0x01&path=/tmp/bg1.png","/superfx/regs","/superfx/ram?addr=0x0000&len=32","/dma/state","/audio/stats","/wram/range?addr=0x1DF9&len=8","/wram/watch?addr=0x1DFB","/wram/watch/log"]}
             """
         }
     }
@@ -498,12 +672,139 @@ final class DebugServer {
             | (((bp3 >> bit) & 1) << 3)
     }
 
+    private func frameSummary(ppu: PPU, presented: Bool) -> String {
+        var nonBlackPixels = 0
+        var minX = SNESConstants.screenWidth
+        var minY = SNESConstants.screenHeight
+        var maxX = -1
+        var maxY = -1
+        var uniqueColors = Set<UInt32>()
+        var samples = [String]()
+
+        for y in 0..<SNESConstants.screenHeight {
+            for x in 0..<SNESConstants.screenWidth {
+                let pixel = ppu.readPixel(x: x, y: y, presented: presented)
+                let color = UInt32(pixel.r) | (UInt32(pixel.g) << 8) | (UInt32(pixel.b) << 16)
+                uniqueColors.insert(color)
+                guard color != 0 else { continue }
+
+                nonBlackPixels += 1
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+
+                if samples.count < 8 {
+                    samples.append(
+                        String(
+                            format: "{\"x\":%d,\"y\":%d,\"color\":\"%06X\"}",
+                            x,
+                            y,
+                            color
+                        )
+                    )
+                }
+            }
+        }
+
+        let totalPixels = SNESConstants.screenWidth * SNESConstants.screenHeight
+        let coverage = Double(nonBlackPixels) / Double(totalPixels)
+        let bbox: String
+        if maxX >= 0, maxY >= 0 {
+            bbox = String(
+                format: "{\"minX\":%d,\"minY\":%d,\"maxX\":%d,\"maxY\":%d,\"width\":%d,\"height\":%d}",
+                minX,
+                minY,
+                maxX,
+                maxY,
+                maxX - minX + 1,
+                maxY - minY + 1
+            )
+        } else {
+            bbox = "null"
+        }
+
+        return String(
+            format: "{\"presented\":%@,\"nonBlackPixels\":%d,\"totalPixels\":%d,\"coverage\":%.6f,\"uniqueColors\":%d,\"bbox\":%@,\"samples\":[%@]}",
+            presented ? "true" : "false",
+            nonBlackPixels,
+            totalPixels,
+            coverage,
+            uniqueColors.count,
+            bbox,
+            samples.joined(separator: ",")
+        )
+    }
+
+    private func dumpFrame(ppu: PPU, presented: Bool, path: String) -> String {
+        var pixels = [UInt32](repeating: 0, count: SNESConstants.screenWidth * SNESConstants.screenHeight)
+        for y in 0..<SNESConstants.screenHeight {
+            for x in 0..<SNESConstants.screenWidth {
+                let pixel = ppu.readPixel(x: x, y: y, presented: presented)
+                pixels[y * SNESConstants.screenWidth + x] =
+                    UInt32(pixel.r) |
+                    (UInt32(pixel.g) << 8) |
+                    (UInt32(pixel.b) << 16) |
+                    0xFF00_0000
+            }
+        }
+        return dumpFrame(pixels: pixels, path: path)
+    }
+
+    private func dumpFrame(pixels: [UInt32], path: String) -> String {
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: SNESConstants.screenWidth,
+            pixelsHigh: SNESConstants.screenHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: SNESConstants.screenWidth * 4,
+            bitsPerPixel: 32
+        ) else {
+            return "{\"error\":\"failed to allocate bitmap\"}"
+        }
+
+        for y in 0..<SNESConstants.screenHeight {
+            for x in 0..<SNESConstants.screenWidth {
+                let color = pixels[y * SNESConstants.screenWidth + x]
+                rep.setColor(
+                    NSColor(
+                        calibratedRed: CGFloat(color & 0xFF) / 255.0,
+                        green: CGFloat((color >> 8) & 0xFF) / 255.0,
+                        blue: CGFloat((color >> 16) & 0xFF) / 255.0,
+                        alpha: 1.0
+                    ),
+                    atX: x,
+                    y: SNESConstants.screenHeight - 1 - y
+                )
+            }
+        }
+
+        guard let png = rep.representation(using: .png, properties: [:]) else {
+            return "{\"error\":\"failed to encode png\"}"
+        }
+
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            return "{\"ok\":true,\"path\":\"\(path)\"}"
+        } catch {
+            return "{\"error\":\"\(error.localizedDescription.replacingOccurrences(of: "\"", with: "'"))\"}"
+        }
+    }
+
     private func parseQuery(_ q: String) -> [String: String] {
         var result = [String: String]()
         for pair in q.split(separator: "&") {
             let kv = pair.split(separator: "=", maxSplits: 1)
             if kv.count == 2 {
-                result[String(kv[0])] = String(kv[1])
+                let rawKey = String(kv[0]).replacingOccurrences(of: "+", with: " ")
+                let rawValue = String(kv[1]).replacingOccurrences(of: "+", with: " ")
+                let key = rawKey.removingPercentEncoding ?? rawKey
+                let value = rawValue.removingPercentEncoding ?? rawValue
+                result[key] = value
             }
         }
         return result
@@ -514,5 +815,11 @@ final class DebugServer {
             return Int(s.dropFirst(2), radix: 16) ?? 0
         }
         return Int(s) ?? 0
+    }
+
+    private func jsonEscaped(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }

@@ -13,7 +13,7 @@ enum SNESConstants {
     static let bytesPerPixel = 4 // RGBA8
 
     // Timing
-    static let dotsPerScanline = 340
+    static let dotsPerScanline = 341
     static let masterCyclesPerDot = 4
     static let masterCyclesPerScanline = 1364
     static let scanlinesPerFrame = 262

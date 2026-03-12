@@ -42,6 +42,8 @@
 		AA000033 /* SaveState.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000038 /* SaveState.swift */; };
 		AA000034 /* DebugServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000039 /* DebugServer.swift */; };
 		AA000040 /* InputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000040 /* InputManager.swift */; };
+		AA000041 /* SuperFX.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000041 /* SuperFX.swift */; };
+		AA000042 /* superfx.cpp in Sources */ = {isa = PBXBuildFile; fileRef = AB000043 /* superfx.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -84,6 +86,9 @@
 		AB000038 /* SaveState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveState.swift; sourceTree = "<group>"; };
 		AB000039 /* DebugServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugServer.swift; sourceTree = "<group>"; };
 		AB000040 /* InputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputManager.swift; sourceTree = "<group>"; };
+		AB000041 /* SuperFX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuperFX.swift; sourceTree = "<group>"; };
+		AB000042 /* superfx.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = superfx.h; sourceTree = "<group>"; };
+		AB000043 /* superfx.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = superfx.cpp; sourceTree = "<group>"; };
 		AB000099 /* MetalSNES.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalSNES.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -160,6 +165,7 @@
 				AB000037 /* AudioOutput.swift */,
 				AB000038 /* SaveState.swift */,
 				AB000039 /* DebugServer.swift */,
+				AB000041 /* SuperFX.swift */,
 			);
 			path = Emulator;
 			sourceTree = "<group>";
@@ -178,6 +184,8 @@
 			children = (
 				AB000025 /* cpu_dispatch.h */,
 				AB000018 /* cpu_dispatch.c */,
+				AB000042 /* superfx.h */,
+				AB000043 /* superfx.cpp */,
 			);
 			path = CCore;
 			sourceTree = "<group>";
@@ -335,6 +343,8 @@
 				AA000033 /* SaveState.swift in Sources */,
 				AA000034 /* DebugServer.swift in Sources */,
 				AA000040 /* InputManager.swift in Sources */,
+				AA000041 /* SuperFX.swift in Sources */,
+				AA000042 /* superfx.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

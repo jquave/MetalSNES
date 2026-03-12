@@ -44,23 +44,28 @@ Launch the app and use the file picker to load a `.sfc` or `.smc` ROM. SRAM is a
 | `--run-ahead <n>` | Run-ahead frame count |
 | `--benchmark <path>` | Headless CPU benchmark — runs 120 frames, prints FPS |
 | `--benchmark-gpu <path>` | Same as above but includes Metal rendering |
+| `--ppu-diagnostic` | Run the built-in headless PPU diagnostic suite |
+| `--diagnose-rom <rom> [frames]` | Run a headless ROM diagnostic from power-on (default 300 frames) |
 | `--diagnose-state <rom> <state> [frames]` | Run a save state diagnostic (default 8 frames) |
+| `--serve-rom <rom>` | Load a ROM and start the debug server without running |
 | `--serve-state <rom> <state>` | Load a save state and start the debug server without running |
 
 ### Debug Server
 
-The built-in HTTP debug server listens on **port 8765** and exposes JSON endpoints for live inspection of the running emulator. Start it with `--serve-state` or programmatically via `EmulatorCore.startDebugServer()`. Hit the root URL to list all available endpoints. Key endpoints:
+The built-in HTTP debug server listens on **port 8765** and exposes JSON endpoints for live inspection of the emulator. Start it with `--serve-rom`, `--serve-state`, or programmatically via `EmulatorCore.startDebugServer()`. Hit the root URL to list all available endpoints. Key endpoints:
 
+- `/emu/run`, `/emu/save-state`, `/emu/load-state`
 - `/cpu/regs`, `/cpu/wram`, `/cpu/trace`, `/cpu/recent-trace`, `/cpu/write-log`
 - `/spc/regs`, `/spc/ram`, `/spc/ports`, `/spc/timers`, `/spc/trace`, `/spc/inject`
 - `/dsp/regs`, `/dsp/voices`, `/dsp/kon`
 - `/ppu/vram`, `/ppu/oam`, `/ppu/sprites`, `/ppu/sprite-sample`
+- `/superfx/regs`, `/superfx/ram`
 - `/dma/state`, `/bus/regs`, `/audio/stats`
 - `/wram/range`, `/wram/watch`, `/wram/watch/log`
 
 ## Status
 
-LoROM and HiROM boot, save states and the debug server work, and both the PPU and APU are real implementations rather than stubs. PPU accuracy gaps remain, and audio is functional but still under active accuracy work. Performance is roughly 400+ FPS in Release mode on Apple Silicon (~6.8x realtime).
+LoROM and HiROM boot, save states and the debug server work, and both the PPU and APU are real implementations rather than stubs. Super FX now has a first-pass execution path that gets Star Fox through real headless frames, and Super FX save states now serialize and restore correctly as well, but run-ahead is still disabled and coprocessor accuracy still needs more validation. PPU accuracy gaps remain, and audio is functional but still under active accuracy work. Performance is roughly 400+ FPS in Release mode on Apple Silicon (~6.8x realtime).
 
 # MetalSNES — Code Flow & Architecture
 
@@ -302,11 +307,11 @@ ppu.renderScanline(y):
   │     BG3p0 → OBJp0 → BG3p1* → OBJp1 → BG2p0 → BG1p0 →
   │     OBJp2 → BG2p1 → BG1p1 → OBJp3 → (BG3p1 at top if BGMODE bit 3)
   │
-  │   Mode 3:
-  │     BG2p0 → BG1p0 → OBJp0 → OBJp1 → BG2p1 → BG1p1 → OBJp2 → OBJp3
+  │   Modes 2/3/4/5:
+  │     BG2p0 → OBJp0 → BG1p0 → OBJp1 → BG2p1 → OBJp2 → BG1p1 → OBJp3
   │
-  │   Modes 2/4/5/6 (simplified):
-  │     BG1p0 → BG2p0 → OBJp0 → OBJp1 → BG1p1 → BG2p1 → OBJp2 → OBJp3
+  │   Mode 6:
+  │     OBJp0 → BG1p0 → OBJp1 → OBJp2 → BG1p1 → OBJp3
   │
   │   Mode 7: affine renderMode7() + all sprites
   │

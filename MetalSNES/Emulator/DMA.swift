@@ -66,13 +66,18 @@ final class DMA {
 
     var dmaLogCount = 0
 
-    func executeGeneralDMA(channels mask: UInt8, bus: Bus) {
+    func executeGeneralDMA(channels mask: UInt8, bus: Bus) -> Int {
+        var activeChannelCount = 0
+        var transferredBytes = 0
+
         for ch in 0..<8 {
             guard (mask & (1 << ch)) != 0 else { continue }
+            activeChannelCount += 1
 
             let channel = channels[ch]
             let direction = (channel.control & 0x80) != 0 // true = B→A (PPU to CPU)
             let mode = channel.control & 0x07
+            transferredBytes += channel.size == 0 ? 0x10000 : Int(channel.size)
 
             if EmulatorCore.debugLogging && dmaLogCount < 80 {
                 let dest = 0x2100 + Int(channel.destReg)
@@ -159,6 +164,9 @@ final class DMA {
             channels[ch].srcAddr = aAddr
             channels[ch].size = 0
         }
+
+        guard activeChannelCount > 0 else { return 0 }
+        return 8 + activeChannelCount * 8 + transferredBytes * 8
     }
 
     // MARK: - HDMA

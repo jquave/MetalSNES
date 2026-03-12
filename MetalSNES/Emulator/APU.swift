@@ -23,6 +23,8 @@ final class APU {
     // Fine-grained DSP interleaving: 1 DSP sample every 64 SMP clocks
     static let spcCyclesPerDSPSample: Double = 2048000.0 / 32000.0  // 64.0
     var dspCycleAccumulator: Double = 0
+    private var pendingAudioLeft: [Int16] = []
+    private var pendingAudioRight: [Int16] = []
 
     // Debug
     private var totalScanlines = 0
@@ -49,6 +51,8 @@ final class APU {
             spc.traceCountdown = 2000
             spc.traceLog2.removeAll()
         }
+        pendingAudioLeft.reserveCapacity(1024)
+        pendingAudioRight.reserveCapacity(1024)
         spc700.reset()
     }
 
@@ -85,10 +89,21 @@ final class APU {
         while dspCycleAccumulator >= APU.spcCyclesPerDSPSample {
             let (l, r) = dsp.generateSample()
             if outputAudio {
-                audioOutput.writeSample(left: l, right: r)
+                pendingAudioLeft.append(l)
+                pendingAudioRight.append(r)
+                if pendingAudioLeft.count >= 1024 {
+                    flushAudio()
+                }
             }
             dspCycleAccumulator -= APU.spcCyclesPerDSPSample
         }
+    }
+
+    func flushAudio() {
+        guard !pendingAudioLeft.isEmpty else { return }
+        audioOutput.writeSamples(left: pendingAudioLeft, right: pendingAudioRight)
+        pendingAudioLeft.removeAll(keepingCapacity: true)
+        pendingAudioRight.removeAll(keepingCapacity: true)
     }
 
     // SPC PC sampling for diagnosis
@@ -229,6 +244,7 @@ final class APU {
     }
 
     func stopAudio() {
+        flushAudio()
         audioOutput.stop()
     }
 

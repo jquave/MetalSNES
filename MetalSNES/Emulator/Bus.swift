@@ -6,6 +6,7 @@ final class Bus {
     var apu: APU
     var dma: DMA
     var joypad: Joypad
+    let superFX: SuperFXChip?
 
     // 128 KB WRAM
     let wram: UnsafeMutableBufferPointer<UInt8>
@@ -13,6 +14,7 @@ final class Bus {
     let sram: UnsafeMutableBufferPointer<UInt8>
 
     var lastDataBusValue: UInt8 = 0
+    private var pendingMasterCyclePenalty = 0
 
     // CPU I/O registers
     var nmitimen: UInt8 = 0     // $4200 - NMI/IRQ enable
@@ -48,10 +50,11 @@ final class Bus {
         wramPtr.initialize(repeating: 0, count: SNESConstants.wramSize)
         self.wram = UnsafeMutableBufferPointer(start: wramPtr, count: SNESConstants.wramSize)
 
-        let sramSize = max(cartridge.sramSizeKB * 1024, 0x2000)
+        let sramSize = max(cartridge.cartRAMSizeBytes, 0x2000)
         let sramPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: sramSize)
         sramPtr.initialize(repeating: 0, count: sramSize)
         self.sram = UnsafeMutableBufferPointer(start: sramPtr, count: sramSize)
+        self.superFX = cartridge.coprocessor == .gsu ? SuperFXChip(cartridge: cartridge, ram: self.sram) : nil
     }
 
     deinit {
@@ -83,6 +86,12 @@ final class Bus {
         writeBankOffset(bank: bank, offset: offset, value: value)
     }
 
+    func consumePendingMasterCyclePenalty() -> Int {
+        let cycles = pendingMasterCyclePenalty
+        pendingMasterCyclePenalty = 0
+        return cycles
+    }
+
     func recordCPUWrite(callerPC: UInt32, opcode: UInt8, targetAddress: UInt32, value: UInt8) {
         guard callerPC != 0 else { return }
 
@@ -110,10 +119,12 @@ final class Bus {
             }
         }
 
-        let isAPUPort = offset >= 0x2140 && offset <= 0x217F &&
-            ((bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF))
-        let isNMITimen = offset == 0x4200 &&
-            ((bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF))
+        let isSystemBank = ((bank <= 0x3F) || (bank >= 0x80 && bank <= 0xBF))
+        let isPPUReg = offset >= 0x2100 && offset <= 0x213F && isSystemBank
+        let isAPUPort = offset >= 0x2140 && offset <= 0x217F && isSystemBank
+        let isCPUReg = offset >= 0x4200 && offset <= 0x43FF && isSystemBank
+        let isSuperFXIO = offset >= 0x3000 && offset <= 0x34FF && isSystemBank
+        let isNMITimen = offset == 0x4200 && isSystemBank
 
         let isSoundMirror: Bool = {
             switch bank {
@@ -126,12 +137,12 @@ final class Bus {
             }
         }()
 
-        guard isAPUPort || isSoundMirror || isNMITimen else { return }
+        guard isPPUReg || isAPUPort || isCPUReg || isSuperFXIO || isSoundMirror || isNMITimen else { return }
         guard captureCPUWriteLog || EmulatorCore.debugLogging else { return }
 
         cpuWriteLog.append((callerPC, opcode, targetAddress, value))
-        if cpuWriteLog.count > 512 {
-            cpuWriteLog.removeFirst(cpuWriteLog.count - 512)
+        if cpuWriteLog.count > 4096 {
+            cpuWriteLog.removeFirst(cpuWriteLog.count - 3072)
         }
 
         if EmulatorCore.debugLogging && cpuWriteLog.count <= 120 {
@@ -156,6 +167,10 @@ final class Bus {
 
     @inline(__always)
     private func readBankOffset(bank: UInt8, offset: UInt16) -> UInt8 {
+        if let value = readSuperFX(bank: bank, offset: offset) {
+            return value
+        }
+
         switch bank {
         case 0x00...0x3F, 0x80...0xBF:
             return readSystemBank(bank: bank, offset: offset)
@@ -274,6 +289,10 @@ final class Bus {
 
     @inline(__always)
     private func writeBankOffset(bank: UInt8, offset: UInt16, value: UInt8) {
+        if writeSuperFX(bank: bank, offset: offset, value: value) {
+            return
+        }
+
         switch bank {
         case 0x00...0x3F, 0x80...0xBF:
             writeSystemBank(bank: bank, offset: offset, value: value)
@@ -377,7 +396,7 @@ final class Bus {
         case 0x420B:
             mdmaen = value
             if value != 0 {
-                dma.executeGeneralDMA(channels: value, bus: self)
+                pendingMasterCyclePenalty += dma.executeGeneralDMA(channels: value, bus: self)
             }
 
         case 0x420C:
@@ -392,6 +411,52 @@ final class Bus {
         default:
             break
         }
+    }
+
+    @inline(__always)
+    private func readSuperFX(bank: UInt8, offset: UInt16) -> UInt8? {
+        guard let superFX else { return nil }
+
+        if (0x3000...0x34FF).contains(offset) {
+            switch bank {
+            case 0x00...0x3F, 0x80...0xBF:
+                return superFX.readIO(offset, defaultData: lastDataBusValue)
+            default:
+                break
+            }
+        }
+
+        if let romAddress = cartridge.gsuCPUROMAddress(bank: bank, offset: offset) {
+            return superFX.cpuReadROM(UInt32(romAddress), defaultData: lastDataBusValue)
+        }
+
+        if let ramAddress = cartridge.gsuCPURAMAddress(bank: bank, offset: offset) {
+            return superFX.cpuReadRAM(UInt32(ramAddress), defaultData: lastDataBusValue)
+        }
+
+        return nil
+    }
+
+    @inline(__always)
+    private func writeSuperFX(bank: UInt8, offset: UInt16, value: UInt8) -> Bool {
+        guard let superFX else { return false }
+
+        if (0x3000...0x34FF).contains(offset) {
+            switch bank {
+            case 0x00...0x3F, 0x80...0xBF:
+                superFX.writeIO(offset, value: value)
+                return true
+            default:
+                break
+            }
+        }
+
+        if let ramAddress = cartridge.gsuCPURAMAddress(bank: bank, offset: offset) {
+            superFX.cpuWriteRAM(UInt32(ramAddress), value: value)
+            return true
+        }
+
+        return false
     }
 
     // MARK: - VBlank / NMI
