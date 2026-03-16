@@ -86,6 +86,7 @@ final class Bus {
         writeBankOffset(bank: bank, offset: offset, value: value)
     }
 
+    @inline(__always)
     func consumePendingMasterCyclePenalty() -> Int {
         let cycles = pendingMasterCyclePenalty
         pendingMasterCyclePenalty = 0

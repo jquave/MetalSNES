@@ -224,6 +224,7 @@ final class PPU {
     private var _currentLayer: UInt8 = 0
     private var pixelTraceTargets = [Int: PixelTraceTarget]()
     private var pixelTraceLogs = [String: [String]]()
+    private var _pixelTracingActive = false
     var gpuRenderingAvailable = false
     var forceCPURendering = false
     private(set) var usesGPURenderingThisFrame = false
@@ -305,12 +306,14 @@ final class PPU {
             pixelTraceTargets[key] = target
             pixelTraceLogs[target.label] = []
         }
+        _pixelTracingActive = !pixelTraceTargets.isEmpty
     }
 
     func consumePixelTraceLogs() -> [String: [String]] {
         let logs = pixelTraceLogs
         pixelTraceTargets.removeAll(keepingCapacity: false)
         pixelTraceLogs.removeAll(keepingCapacity: false)
+        _pixelTracingActive = false
         return logs
     }
 
@@ -926,13 +929,17 @@ final class PPU {
         let backdropColor = cgramColorCache[0]
         for x in 0..<SNESConstants.screenWidth {
             backBuffer32[linePixelOffset + x] = backdropColor
-            mainLayerLine[x] = 0  // backdrop
+        }
+        mainLayerLine.withUnsafeMutableBufferPointer { ptr in
+            memset(ptr.baseAddress!, 0, 256)
         }
 
         // Render main screen layers
         _renderingSubScreen = false
         _currentLayer = 0
-        for i in 0..<256 { pixelZ[i] = 0 }
+        pixelZ.withUnsafeMutableBufferPointer { ptr in
+            memset(ptr.baseAddress!, 0, 256)
+        }
         let hasOBJ = (tm & 0x10) != 0
         renderLayers(mode: mode, layerMask: tm, hasOBJ: hasOBJ, scanline: y)
 
@@ -944,11 +951,15 @@ final class PPU {
                 // The subscreen always starts from backdrop for the current scanline.
                 for x in 0..<256 {
                     subScreenBuffer32[linePixelOffset + x] = backdropColor
-                    subLayerLine[x] = 0
+                }
+                subLayerLine.withUnsafeMutableBufferPointer { ptr in
+                    memset(ptr.baseAddress!, 0, 256)
                 }
                 if ts != 0 {
                     _renderingSubScreen = true
-                    for i in 0..<256 { pixelZ[i] = 0 }
+                    pixelZ.withUnsafeMutableBufferPointer { ptr in
+                        memset(ptr.baseAddress!, 0, 256)
+                    }
                     let subHasOBJ = (ts & 0x10) != 0
                     renderLayers(mode: mode, layerMask: ts, hasOBJ: subHasOBJ, scanline: y)
                     _renderingSubScreen = false
@@ -1669,20 +1680,22 @@ final class PPU {
     private func writePixel(_ pixelIndex: Int, _ screenX: Int, color: UInt32, z: UInt8 = 255, sourceLayer: UInt8? = nil) {
         let resolvedLayer = sourceLayer ?? _currentLayer
         let previousZ = pixelZ[screenX]
-        let previousLayer = _renderingSubScreen ? subLayerLine[screenX] : mainLayerLine[screenX]
         if z < previousZ {
-            appendPixelTrace(
-                pixelIndex: pixelIndex,
-                screenX: screenX,
-                message: String(
-                    format: "%@ %@ z=%d rejected by %@ z=%d",
-                    _renderingSubScreen ? "sub" : "main",
-                    layerName(for: resolvedLayer),
-                    z,
-                    layerName(for: previousLayer),
-                    previousZ
+            if _pixelTracingActive {
+                let previousLayer = _renderingSubScreen ? subLayerLine[screenX] : mainLayerLine[screenX]
+                appendPixelTrace(
+                    pixelIndex: pixelIndex,
+                    screenX: screenX,
+                    message: String(
+                        format: "%@ %@ z=%d rejected by %@ z=%d",
+                        _renderingSubScreen ? "sub" : "main",
+                        layerName(for: resolvedLayer),
+                        z,
+                        layerName(for: previousLayer),
+                        previousZ
+                    )
                 )
-            )
+            }
             return
         }
         let windowMask = _renderingSubScreen ? tsw : tmw
@@ -1690,33 +1703,38 @@ final class PPU {
         if windowBit != 0 && (windowMask & windowBit) != 0 {
             let windowLayer = resolvedLayer >= 5 ? 5 : Int(resolvedLayer)
             if isWindowMasked(layer: windowLayer, screenX: screenX) {
-                appendPixelTrace(
-                    pixelIndex: pixelIndex,
-                    screenX: screenX,
-                    message: String(
-                        format: "%@ %@ z=%d masked by window",
-                        _renderingSubScreen ? "sub" : "main",
-                        layerName(for: resolvedLayer),
-                        z
+                if _pixelTracingActive {
+                    appendPixelTrace(
+                        pixelIndex: pixelIndex,
+                        screenX: screenX,
+                        message: String(
+                            format: "%@ %@ z=%d masked by window",
+                            _renderingSubScreen ? "sub" : "main",
+                            layerName(for: resolvedLayer),
+                            z
+                        )
                     )
-                )
+                }
                 return
             }
         }
 
-        appendPixelTrace(
-            pixelIndex: pixelIndex,
-            screenX: screenX,
-            message: String(
-                format: "%@ %@ z=%d overwrote %@ z=%d color=%06X",
-                _renderingSubScreen ? "sub" : "main",
-                layerName(for: resolvedLayer),
-                z,
-                layerName(for: previousLayer),
-                previousZ,
-                color & 0x00FF_FFFF
+        if _pixelTracingActive {
+            let previousLayer = _renderingSubScreen ? subLayerLine[screenX] : mainLayerLine[screenX]
+            appendPixelTrace(
+                pixelIndex: pixelIndex,
+                screenX: screenX,
+                message: String(
+                    format: "%@ %@ z=%d overwrote %@ z=%d color=%06X",
+                    _renderingSubScreen ? "sub" : "main",
+                    layerName(for: resolvedLayer),
+                    z,
+                    layerName(for: previousLayer),
+                    previousZ,
+                    color & 0x00FF_FFFF
+                )
             )
-        )
+        }
 
         if !_renderingSubScreen {
             pixelZ[screenX] = z

@@ -29,6 +29,7 @@ final class CPU {
 
     // Instruction log for debugging
     var traceEnabled = false
+    var recentTraceEnabled = false
     var traceLog: [TraceEntry] = []
     private let maxTraceEntries = 500
     private(set) var recentTrace: [TraceEntry] = []
@@ -53,25 +54,32 @@ final class CPU {
         currentInstructionPC = (UInt32(regs.PBR) << 16) | UInt32(regs.PC)
         currentOpcode = bus.read(currentInstructionPC)
 
-        let entry = TraceEntry(
-            pc: currentInstructionPC,
-            opcode: currentOpcode,
-            a: regs.A,
-            x: regs.X,
-            y: regs.Y,
-            s: regs.S,
-            d: regs.D,
-            p: regs.P,
-            emulationMode: regs.emulationMode
-        )
+        // Only record trace entries when tracing is active (debug only).
+        // This avoids per-instruction struct allocation + array append in
+        // the normal hot path, which is a significant performance win.
+        if traceEnabled || recentTraceEnabled {
+            let entry = TraceEntry(
+                pc: currentInstructionPC,
+                opcode: currentOpcode,
+                a: regs.A,
+                x: regs.X,
+                y: regs.Y,
+                s: regs.S,
+                d: regs.D,
+                p: regs.P,
+                emulationMode: regs.emulationMode
+            )
 
-        recentTrace.append(entry)
-        if recentTrace.count > maxRecentTraceEntries {
-            recentTrace.removeFirst(maxRecentTraceEntries / 4)
-        }
+            if recentTraceEnabled {
+                recentTrace.append(entry)
+                if recentTrace.count > maxRecentTraceEntries {
+                    recentTrace.removeFirst(maxRecentTraceEntries / 4)
+                }
+            }
 
-        if traceEnabled && traceLog.count < maxTraceEntries {
-            traceLog.append(entry)
+            if traceEnabled && traceLog.count < maxTraceEntries {
+                traceLog.append(entry)
+            }
         }
 
         // Check for NMI from bus

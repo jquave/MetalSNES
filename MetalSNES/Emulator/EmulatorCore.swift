@@ -58,6 +58,7 @@ final class EmulatorCore {
     func startDebugServer() {
         guard debugServer == nil else { return }
         bus.captureCPUWriteLog = true
+        cpu.recentTraceEnabled = true
         let server = DebugServer()
         server.emulator = self
         server.start()
@@ -69,6 +70,7 @@ final class EmulatorCore {
         debugServer = nil
         bus.captureCPUWriteLog = false
         bus.cpuWriteLog.removeAll(keepingCapacity: false)
+        cpu.recentTraceEnabled = false
     }
 
     func run() {

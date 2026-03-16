@@ -27,6 +27,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let textureLock = NSLock()
     private weak var view: MTKView?
 
+    /// Triple-buffering semaphore: allows up to 3 frames in flight to keep
+    /// the GPU pipeline fed and avoid stalling the emulation thread.
+    private let inflightSemaphore = DispatchSemaphore(value: 3)
+
     private let vramBuffer: MTLBuffer?
     private let oamBuffer: MTLBuffer?
     private let colorBuffer: MTLBuffer?
@@ -78,7 +82,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         mtkView.device = device
 
         if let metalLayer = mtkView.layer as? CAMetalLayer {
-            metalLayer.maximumDrawableCount = 2
+            metalLayer.maximumDrawableCount = 3
             metalLayer.presentsWithTransaction = false
             metalLayer.displaySyncEnabled = true
         }
@@ -167,6 +171,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             mipmapped: false
         )
         desc.usage = [.shaderRead, .shaderWrite]
+        // Use shared storage on Apple Silicon (unified memory) to avoid
+        // CPU→GPU copy overhead on replaceRegion calls.
+        if device.hasUnifiedMemory {
+            desc.storageMode = .shared
+        }
         texture = device.makeTexture(descriptor: desc)
     }
 
@@ -427,9 +436,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
+        // Wait for an available inflight slot (triple buffering)
+        inflightSemaphore.wait()
+
         guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
+            inflightSemaphore.signal()
             return
         }
 
@@ -476,6 +489,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
 
         commandBuffer.present(drawable)
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.inflightSemaphore.signal()
+        }
         commandBuffer.commit()
     }
 }
